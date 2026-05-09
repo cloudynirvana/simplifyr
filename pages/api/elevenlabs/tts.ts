@@ -31,10 +31,17 @@ export default async function handler(
       outputFormat: "mp3_44100_128",
     });
 
+    const reader = audioStream.getReader();
+    const chunks: Uint8Array[] = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) chunks.push(value);
+    }
+    const buffer = Buffer.concat(chunks);
+
     res.setHeader("Content-Type", "audio/mpeg");
-    
-    // The ElevenLabs JS SDK returns a Node Readable stream in Node.js environments
-    audioStream.pipe(res);
+    res.send(buffer);
   } catch (err: any) {
     console.error("[ElevenLabs] TTS error:", err);
     return res.status(500).json({ error: err?.message ?? "TTS Generation failed" });
