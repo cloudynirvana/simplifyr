@@ -182,7 +182,31 @@ function NoahModal({
   const [verdict, setVerdict] = useState<NoahVerdict | null>(null);
   const [reason, setReason] = useState("");
   const [loading, setLoading] = useState(false);
+  const [audioLoading, setAudioLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  const playVerdict = async () => {
+    if (!verdict) return;
+    setAudioLoading(true);
+    try {
+      const res = await fetch("/api/elevenlabs/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: verdict.reasoning }),
+      });
+      if (!res.ok) throw new Error("Audio generation failed");
+      
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.play();
+    } catch (err) {
+      console.error("Audio error:", err);
+      alert("Failed to generate audio verdict. Is ELEVENLABS_API_KEY set?");
+    } finally {
+      setAudioLoading(false);
+    }
+  };
 
   const askNoah = async () => {
     if (!reason.trim()) return;
@@ -272,6 +296,14 @@ function NoahModal({
                 Copy the seller split BPS ({verdict.sellerSplitBps}) and pass it to{" "}
                 <code>resolve_dispute</code> via the Noah authority keypair.
               </p>
+              <button 
+                className="btn-primary" 
+                style={{ width: '100%', marginTop: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                onClick={playVerdict}
+                disabled={audioLoading}
+              >
+                {audioLoading ? "Generating Audio..." : "🔊 Play Noah's Audio Verdict"}
+              </button>
             </div>
           )}
         </div>
