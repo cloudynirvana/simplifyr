@@ -27,8 +27,8 @@ export default async function handler(
     console.log(`[ElevenLabs] Generating TTS for: "${text.slice(0, 30)}..."`);
     const audioStream = await elevenlabs.textToSpeech.convert(voiceId, {
       text,
-      model_id: "eleven_turbo_v2_5",
-      output_format: "mp3_44100_128",
+      modelId: "eleven_turbo_v2_5",
+      outputFormat: "mp3_44100_128",
     });
 
     res.setHeader("Content-Type", "audio/mpeg");
