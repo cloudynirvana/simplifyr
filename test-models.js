@@ -1,0 +1,1 @@
+const OpenAI = require('openai'); const openai = new OpenAI({apiKey: '', baseURL: 'https://integrate.api.nvidia.com/v1'}); async function m() { const res = await openai.models.list(); console.log(res.data.map(m=; } m(); 
