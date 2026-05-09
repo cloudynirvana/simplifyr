@@ -98,7 +98,6 @@ code {
 }
 .nav-link:hover { color: var(--accent); text-decoration: none; }
 
-/* Wallet button override */
 .wallet-btn {
   background: var(--bg3) !important;
   border: 1px solid var(--border2) !important;
@@ -111,6 +110,31 @@ code {
   transition: border-color 0.2s !important;
 }
 .wallet-btn:hover { border-color: var(--accent) !important; }
+
+/* Solana Wallet Modal Overrides to prevent users getting trapped */
+.wallet-adapter-modal-wrapper {
+  background: var(--bg2) !important;
+  border: 1px solid var(--border2) !important;
+  border-radius: var(--radius) !important;
+}
+.wallet-adapter-modal-title {
+  color: var(--text) !important;
+  font-family: var(--font-display) !important;
+}
+.wallet-adapter-modal-button-close {
+  background: var(--bg3) !important;
+  border-radius: 50% !important;
+  padding: 8px !important;
+}
+.wallet-adapter-modal-button-close svg {
+  fill: var(--text) !important;
+}
+.wallet-adapter-modal-button-close:hover {
+  background: var(--err) !important;
+}
+.wallet-adapter-modal-button-close:hover svg {
+  fill: #fff !important;
+}
 
 /* ── Hero ────────────────────────────────────────────────────────────────────── */
 .hero {

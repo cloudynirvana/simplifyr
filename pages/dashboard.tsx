@@ -417,6 +417,9 @@ export default function Dashboard() {
             <div className="empty-state">
               <p>Connect your wallet to see your escrows</p>
               <WalletMultiButton className="wallet-btn" />
+              <Link href="/" className="nav-link" style={{ marginTop: '12px' }}>
+                ← Go Back to Home
+              </Link>
             </div>
           ) : filtered.length === 0 ? (
             <div className="empty-state">
