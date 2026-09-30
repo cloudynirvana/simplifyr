@@ -13,7 +13,7 @@ export const DEFAULT_LIMITS: RiskLimits = {
   maxPositionPct: 0.25,
   stopLossPct: 0.12,
   maxDailyLossPct: 0.05,
-  maxDrawdownPct: 0.2,
+  maxDrawdownPct: 0.15,
   minLiquidityUsd: 100_000,
   maxOrderPctOfLiquidity: 0.005,
 };
