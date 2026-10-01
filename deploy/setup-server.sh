@@ -4,29 +4,39 @@
 # SAFETY: password login is only disabled after your key is installed and sshd config validates.
 # Keep your root session open and test a NEW login as the new user BEFORE closing it.
 set -euo pipefail
-USER_NAME="${1:?usage: setup-server.sh <username> \"<ssh public key>\"}"
-PUBKEY="${2:?provide your SSH public key (starts with ssh-ed25519 or ssh-rsa)}"
-case "$PUBKEY" in ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*) ;; *) echo "That does not look like a public key"; exit 1;; esac
+USER_NAME="${1:?usage: setup-server.sh <username> \"<ssh public key>\"|-   (use - if the user already has working key login)}"
+PUBKEY="${2:--}"
+if [ "$PUBKEY" != "-" ]; then
+  case "$PUBKEY" in ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*) ;; *) echo "That does not look like a public key"; exit 1;; esac
+fi
 [ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y && apt-get upgrade -y
-apt-get install -y ufw unattended-upgrades docker.io docker-compose-v2 python3 curl ca-certificates
+apt-get install -y ufw unattended-upgrades python3 curl ca-certificates git
+# Only install Docker if it is not already present (an existing docker-ce would conflict with docker.io)
+command -v docker >/dev/null 2>&1 || apt-get install -y docker.io docker-compose-v2
 
 id "$USER_NAME" &>/dev/null || adduser --disabled-password --gecos "" "$USER_NAME"
 usermod -aG docker "$USER_NAME"
 install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.ssh"
-grep -qxF "$PUBKEY" "/home/$USER_NAME/.ssh/authorized_keys" 2>/dev/null || echo "$PUBKEY" >> "/home/$USER_NAME/.ssh/authorized_keys"
+if [ "$PUBKEY" != "-" ]; then
+  grep -qxF "$PUBKEY" "/home/$USER_NAME/.ssh/authorized_keys" 2>/dev/null || echo "$PUBKEY" >> "/home/$USER_NAME/.ssh/authorized_keys"
+fi
 chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.ssh/authorized_keys"; chmod 600 "/home/$USER_NAME/.ssh/authorized_keys"
 [ -s "/home/$USER_NAME/.ssh/authorized_keys" ] || { echo "authorized_keys empty; refusing to disable passwords"; exit 1; }
 
-cat > /etc/ssh/sshd_config.d/99-hardening.conf <<'CONF'
+# sshd uses the FIRST value it reads and reads files in name order. Ubuntu/cloud-init ships 50-cloud-init.conf with
+# "PasswordAuthentication yes", so our file must sort BEFORE it (00-), otherwise password login stays on.
+rm -f /etc/ssh/sshd_config.d/99-hardening.conf
+cat > /etc/ssh/sshd_config.d/00-hardening.conf <<'CONF'
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin no
 PubkeyAuthentication yes
 CONF
 sshd -t && systemctl reload ssh
+[ "$(sshd -T | awk '/^passwordauthentication /{print $2}')" = "no" ] || { echo "ERROR: password login is still enabled; check /etc/ssh/sshd_config.d/*"; exit 1; }
 
 ufw default deny incoming; ufw default allow outgoing; ufw allow 22/tcp; ufw --force enable
 
