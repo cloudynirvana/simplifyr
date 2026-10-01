@@ -1,0 +1,6 @@
+[Unit]
+Description=pumpbot up/down watchdog (status alerts only)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/pumpbot/deploy/watchdog.sh

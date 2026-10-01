@@ -58,14 +58,14 @@ Status key: **T** = tested with mocks/synthetic data, **L** = verified against l
 ### Pump.fun / Solana (the PumpPortal path)
 | File | Purpose | Status |
 |---|---|---|
-| `src/lib/pumpportal.ts` | Read-only websocket feed (new tokens, per-token trades), reconnect + backoff, queued subscriptions | T; **U**: event field names written from memory; **never run live** (sandbox proxy blocks websockets) |
+| `src/lib/pumpportal.ts` | Read-only websocket feed (new tokens, per-token trades), reconnect + backoff, queued subscriptions | T, L. **Verified live (2026-10-01): the `create` event fields match; the websocket DOES work from the sandbox with `NODE_USE_ENV_PROXY=1`. The per-token trade stream is NOT keyless: it needs an API key whose wallet holds >= 0.02 SOL.** Trade-event shape still unverified. |
 | `src/trading/pumpTracker.ts` | Builds filter inputs from events: age, buy/sell counts, unique traders, holders, dev holdings/sells, price change | T; **U**: supply=1B, fees ~1% of volume, liquidity = virtual SOL - 30, authorities *assumed* revoked |
 | `src/trading/pumpFilters.ts` | Hard filters + execution caps (slippage <=15%, impact <=5%, tip <=2% of order) | T |
 | `src/trading/screenFilters.ts` | Market-data screen for DexScreener pairs, incl. lopsided-flow rule (buys/sells > 8) | T, L |
 | `src/lib/rugcheck.ts`, `src/trading/rugcheckFilter.ts`, `src/trading/rugcheckGate.ts` | RugCheck.xyz report -> veto (insider networks >5% combined, creator >5%, LP lock <90%, top holder >5%, bundle cluster, authorities, danger risks); cached, 3 s spacing, fails closed | T, L |
 | `src/lib/dexscreener.ts` | Search, pair, token-pairs | L |
 | `src/lib/jupiter.ts`, `src/trading/jupiterPaper.ts` | Read-only quote client; paper executor that fills at real quotes and refuses >5% impact | T; **U**: endpoints/fields from memory |
-| `scripts/pump-scan.ts` | Live scanner (websocket) -> logs tokens passing all gates to `.trading-state/pump-candidates.jsonl` | **never run live** |
+| `scripts/pump-scan.ts` | Live scanner (websocket) -> logs tokens passing all gates to `.trading-state/pump-candidates.jsonl`. Refreshes SOL/USD live, writes `heartbeat.json`, and refuses to log candidates when the trade stream is denied | L for create events and heartbeat; **without a funded `PUMPPORTAL_API_KEY` it has no holder/flow data** |
 | `scripts/screen-dex.ts` | One-shot HTTP screen (works anywhere): DexScreener feeds -> market filters -> RugCheck | L |
 | `scripts/trade-sheet.ts <mint>` | Runs every filter on one mint; writes a filled manual entry/exit sheet only if it passes (`--demo` previews format) | T, L |
 
@@ -100,10 +100,10 @@ Status key: **T** = tested with mocks/synthetic data, **L** = verified against l
 
 ## 5. Verified facts vs assumptions
 
-**Verified live:** Hyperliquid info API (178 perps, candles, funding); DexScreener; GeckoTerminal; RugCheck report API (keyless); Jev/TypeSafe API host reachable and requires a key; main Raydium SOL/USDC pool data.
+**Verified live:** PumpPortal new-token websocket (create events) and the trade-stream key requirement; Hyperliquid info API (178 perps, candles, funding); DexScreener; GeckoTerminal; RugCheck report API (keyless); Jev/TypeSafe API host reachable and requires a key; main Raydium SOL/USDC pool data.
 
 **Not verified (must check before relying on them):**
-- PumpPortal event field names and rate limits; whether it restricts datacenter IPs.
+- PumpPortal trade-event field names (create events verified); rate limits; whether it restricts datacenter IPs.
 - Jupiter quote endpoints/fields; whether Jupiter limit/trigger orders support stop-loss for pumpswap tokens.
 - Hyperliquid fee tiers and any US-IP / jurisdiction restrictions (I believe both Hyperliquid and Bybit restrict US access; confirm before choosing a US server).
 - That Hyperliquid API wallets can trade but not withdraw (my understanding; confirm in docs).
@@ -127,8 +127,9 @@ Status key: **T** = tested with mocks/synthetic data, **L** = verified against l
    - cron: `scripts/nightly-review.ts` daily
    - alerting: Telegram bot (backlog); until built, tail the candidates file.
 5. **Secrets:** a root-owned env file (mode 600) loaded by systemd; never in git, never in chat. Dedicated trading wallet funded by hand with a small amount; the server must have no path to withdraw to other addresses.
-6. **Network note for this dev sandbox:** HTTP APIs work (use `NODE_USE_ENV_PROXY=1` for Node fetch); WebSockets do not. The live scanner must run on the VPS.
-7. **Monitoring:** healthcheck that the websocket is receiving events; alert if no events for >5 min; log rotation; daily summary of candidates, vetoes by reason, paper PnL, kill-switch state.
+6. **Network note for this dev sandbox:** HTTP APIs and WebSockets work with `NODE_USE_ENV_PROXY=1` (an earlier claim here that WebSockets are blocked was wrong: the handshake test omitted that flag). The sandbox is ephemeral, so the 24/7 scanner still belongs on the VPS.
+7. **PumpPortal trade stream needs a key (verified live).** Create a fresh PumpPortal API key and fund its wallet with the minimum (>= 0.02 SOL, about $2). That wallet is controlled by PumpPortal's Lightning service, so treat it as spent money, never fund it further, and never reuse a key that was pasted in chat. Alternative without PumpPortal custody: subscribe to pump.fun program logs through Helius and parse trades on-chain (more work, no custody). Until one of these exists, holder/flow filters have nothing to work on for fresh pump.fun tokens; the DexScreener-based `screen-dex.ts` path (migrated tokens) still works.
+8. **Monitoring:** healthcheck that the websocket is receiving events; alert if no events for >5 min; log rotation; daily summary of candidates, vetoes by reason, paper PnL, kill-switch state.
 
 ---
 

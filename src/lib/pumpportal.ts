@@ -1,5 +1,7 @@
 /**
- * PumpPortal DATA feed (read-only websocket). No keys, no orders, no wallet.
+ * PumpPortal DATA feed (read-only websocket). Places no orders.
+ *   subscribeNewToken is free. VERIFIED LIVE: subscribeTokenTrade is NOT: the server replies that it needs an API key
+ *   whose wallet holds >= 0.02 SOL. Pass the key via PUMPPORTAL_API_KEY (url ?api-key=). Never fund that wallet beyond the minimum.
  *   wss://pumpportal.fun/api/data  — subscribeNewToken / subscribeTokenTrade
  * Event field names below are from memory and UNVERIFIED (docs were not reachable from the build sandbox);
  * verify against https://pumpportal.fun/data-api/real-time before trusting them. The trading API
@@ -7,6 +9,8 @@
  */
 
 export interface PortalEvent {
+  /** Server notices, e.g. the denial of subscribeTokenTrade without a funded API key. */
+  message?: string;
   txType?: "create" | "buy" | "sell";
   signature?: string;
   mint?: string;
