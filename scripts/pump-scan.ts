@@ -8,12 +8,14 @@ import fs from "fs";
 import { PumpPortalFeed } from "../src/lib/pumpportal";
 import { PumpTracker } from "../src/trading/pumpTracker";
 import { evaluateToken } from "../src/trading/pumpFilters";
+import { makeRugCheckGate } from "../src/trading/rugcheckGate";
 
 const solUsd = Number(process.argv[2] ?? 150);
 fs.mkdirSync(".trading-state", { recursive: true });
 const out = ".trading-state/pump-candidates.jsonl";
 const tracker = new PumpTracker(300);
 const seen = new Set<string>();
+const rugGate = makeRugCheckGate();
 const feed: PumpPortalFeed = new PumpPortalFeed((e) => {
   const r = tracker.handle(e);
   if (r.created) feed.trackTrades(r.created);
@@ -21,13 +23,18 @@ const feed: PumpPortalFeed = new PumpPortalFeed((e) => {
 }, { log: (m) => console.log(m) });
 
 feed.start();
-setInterval(() => {
+setInterval(async () => {
   let passed = 0;
   for (const mint of tracker.tokens.keys()) {
     const t = tracker.toPumpToken(mint, solUsd);
     if (!t || t.ageMinutes < 15) continue;
     const r = evaluateToken(t);
-    if (r.pass && !seen.has(mint)) { seen.add(mint); passed++; fs.appendFileSync(out, JSON.stringify({ at: Date.now(), token: t, warnings: r.warnings }) + "\n"); }
+    if (r.pass && !seen.has(mint)) {
+      seen.add(mint); // evaluate each token once; RugCheck is the LAST gate and fails closed
+      const rc = await rugGate(mint);
+      fs.appendFileSync(out, JSON.stringify({ at: Date.now(), token: t, warnings: r.warnings, rugcheck: rc }) + "\n");
+      if (rc.pass) passed++;
+    }
   }
   console.log(`${new Date().toISOString()} tracking ${tracker.tokens.size}, new candidates ${passed}`);
 }, 30_000);
