@@ -40,13 +40,15 @@ sshd -t && systemctl reload ssh
 
 ufw default deny incoming; ufw default allow outgoing; ufw allow 22/tcp; ufw --force enable
 
-install -d -m 750 /etc/pumpbot /opt/pumpbot /opt/pumpbot/state /var/lib/pumpbot
+install -d -m 750 /etc/pumpbot /opt/pumpbot /var/lib/pumpbot
+install -d -m 755 /opt/pumpbot/state   # heartbeat/ledger are not secret; the deploy user must be able to read them
 chown -R "$USER_NAME:$USER_NAME" /opt/pumpbot
 # Docker's UID for the container user is 1000 (node); make the state dir writable for it
 chown 1000:1000 /opt/pumpbot/state
 [ -f /etc/pumpbot/env ] || { cp "$(dirname "$0")/env.example" /etc/pumpbot/env; }
 # docker compose reads env_file as the invoking user, so the docker group needs read access (members are already root-equivalent).
 # Nobody else can read it, and it is never in git.
+chgrp docker /etc/pumpbot; chmod 750 /etc/pumpbot   # compose runs as a docker-group user and must traverse this dir
 chown root:docker /etc/pumpbot/env; chmod 640 /etc/pumpbot/env
 
 systemctl enable --now docker
