@@ -2,7 +2,7 @@ services:
   scanner:
     build: .
     restart: unless-stopped            # crash/reboot -> comes back without anyone's phone
-    env_file: /etc/pumpbot/env          # root-owned, mode 600; never in git
+    env_file: /etc/pumpbot/env          # root:docker, mode 640 (compose reads it as the invoking user); never in git
     volumes:
       - /opt/pumpbot/state:/app/.trading-state   # ledger + heartbeat survive container restarts
     cap_drop: [ALL]

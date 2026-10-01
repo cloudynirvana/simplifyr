@@ -45,7 +45,9 @@ chown -R "$USER_NAME:$USER_NAME" /opt/pumpbot
 # Docker's UID for the container user is 1000 (node); make the state dir writable for it
 chown 1000:1000 /opt/pumpbot/state
 [ -f /etc/pumpbot/env ] || { cp "$(dirname "$0")/env.example" /etc/pumpbot/env; }
-chmod 600 /etc/pumpbot/env; chown root:root /etc/pumpbot/env
+# docker compose reads env_file as the invoking user, so the docker group needs read access (members are already root-equivalent).
+# Nobody else can read it, and it is never in git.
+chown root:docker /etc/pumpbot/env; chmod 640 /etc/pumpbot/env
 
 systemctl enable --now docker
 echo "Done. NEXT: (1) from another terminal confirm: ssh $USER_NAME@<server-ip>   (2) only then close the root session."
