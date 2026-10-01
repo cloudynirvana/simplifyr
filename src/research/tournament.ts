@@ -17,13 +17,13 @@ export interface StratReport {
   chosen: string; passed: boolean; failures: string[];
 }
 
-export interface TournamentResult { reports: StratReport[]; nTrials: number; benchmarks: { btcBuyHold: { sharpe: number; ret: number }; eqWeightLong: { sharpe: number; ret: number } }; days: number; oosStart: string; holdoutStart: string }
+export interface TournamentResult { benchCoin: string; reports: StratReport[]; nTrials: number; benchmarks: { btcBuyHold: { sharpe: number; ret: number }; eqWeightLong: { sharpe: number; ret: number } }; days: number; oosStart: string; holdoutStart: string }
 
-function cfgWithCosts(mult: number): RunConfig { return { ...DEFAULT_CONFIG, costs: { feeBps: DEFAULT_CONFIG.costs.feeBps * mult, slippageBps: DEFAULT_CONFIG.costs.slippageBps * mult } }; }
+function cfgWithCosts(base: RunConfig, mult: number): RunConfig { return { ...base, costs: { feeBps: base.costs.feeBps * mult, slippageBps: base.costs.slippageBps * mult } }; }
 
-export function runTournament(p: Panel, cands: Candidate[] = candidates()): TournamentResult {
+export function runTournament(p: Panel, cands: Candidate[] = candidates(), base: RunConfig = DEFAULT_CONFIG): TournamentResult {
   const T = p.dates.length, hold0 = T - SETTINGS.holdoutDays, oos0 = SETTINGS.warmup + SETTINGS.trainDays;
-  const runs = cands.map((c) => { const raw = c.weights(p); return { c, base: runWeights(p, raw), stress: runWeights(p, raw, cfgWithCosts(2)) }; });
+  const runs = cands.map((c) => { const raw = c.weights(p); return { c, base: runWeights(p, raw, base), stress: runWeights(p, raw, cfgWithCosts(base, 2)) }; });
   const nTrials = runs.length, trialSr = runs.map((r) => sharpeDaily(r.base.ret.slice(SETTINGS.warmup, hold0)));
   const names = [...new Set(cands.map((c) => c.name))];
   const reports: StratReport[] = names.map((name) => {
@@ -45,7 +45,7 @@ export function runTournament(p: Panel, cands: Candidate[] = candidates()): Tour
     if (stressSharpe < GATES.minStressSharpe) failures.push(`2x-cost Sharpe ${stressSharpe.toFixed(2)} < ${GATES.minStressSharpe}`);
     return { name, thesis: group[0].c.thesis, configs: group.length, wf, dsr, holdout, stressSharpe, turnover: group.reduce((a, g) => a + g.base.turnover, 0) / group.length, chosen: chosenLog.join(" > "), passed: failures.length === 0, failures };
   });
-  const btc = p.coins.indexOf("BTC"), btcRet = p.ret[btc].map((x) => (Number.isFinite(x) ? x : 0)), eq = p.dates.map((_, t) => { const xs = p.coins.map((_, c) => p.ret[c][t]).filter(Number.isFinite); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0; });
+  const benchCoin = p.coins.includes("BTC") ? "BTC" : p.coins.includes("DOGE") ? "DOGE" : p.coins[0], btc = p.coins.indexOf(benchCoin), btcRet = p.ret[btc].map((x) => (Number.isFinite(x) ? x : 0)), eq = p.dates.map((_, t) => { const xs = p.coins.map((_, c) => p.ret[c][t]).filter(Number.isFinite); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0; });
   const seg = (r: number[]) => r.slice(oos0, hold0);
-  return { reports, nTrials, benchmarks: { btcBuyHold: { sharpe: sharpe(seg(btcRet)), ret: totalReturn(seg(btcRet)) }, eqWeightLong: { sharpe: sharpe(seg(eq)), ret: totalReturn(seg(eq)) } }, days: T, oosStart: new Date(p.dates[oos0]).toISOString().slice(0, 10), holdoutStart: new Date(p.dates[hold0]).toISOString().slice(0, 10) };
+  return { reports, nTrials, benchCoin, benchmarks: { btcBuyHold: { sharpe: sharpe(seg(btcRet)), ret: totalReturn(seg(btcRet)) }, eqWeightLong: { sharpe: sharpe(seg(eq)), ret: totalReturn(seg(eq)) } }, days: T, oosStart: new Date(p.dates[oos0]).toISOString().slice(0, 10), holdoutStart: new Date(p.dates[hold0]).toISOString().slice(0, 10) };
 }
