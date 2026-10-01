@@ -5,6 +5,7 @@
  * NOTE: profile/boost feeds are paid promotion, so this sample is biased toward advertised tokens.
  */
 import { makeRugCheckGate } from "../src/trading/rugcheckGate";
+import { marketScreen } from "../src/trading/screenFilters";
 
 const get = async (p: string) => { const r = await fetch("https://api.dexscreener.com" + p); if (!r.ok) throw new Error(`${p} ${r.status}`); return r.json() as Promise<any>; };
 
@@ -18,17 +19,9 @@ async function main() {
 
   const now = Date.now(), survivors: any[] = [], tally: Record<string, number> = {};
   for (const p of best.values()) {
-    const liq = p.liquidity?.usd ?? 0, vol = p.volume?.h24 ?? 0, ageH = p.pairCreatedAt ? (now - p.pairCreatedAt) / 36e5 : NaN, mc = p.marketCap ?? p.fdv ?? 0;
-    const h1 = p.txns?.h1 ?? { buys: 0, sells: 0 }, m5 = p.txns?.m5 ?? { buys: 0, sells: 0 };
-    const f: string[] = [];
-    if (!(liq >= 25_000)) f.push("liq<25k");
-    if (!(ageH >= 0.5)) f.push("age<30m"); else if (ageH > 48) f.push("age>48h");
-    if (!(mc >= 50_000)) f.push("mcap<50k");
-    if (liq > 0 && vol / liq > 15) f.push("vol/liq>15");
-    if (h1.sells === 0 && h1.buys >= 20) f.push("no sells");
-    if (m5.buys > 0 && m5.sells / m5.buys > 1.5) f.push("sell pressure");
-    if ((p.priceChange?.h1 ?? 0) > 300) f.push("late +300%");
-    if (h1.buys + h1.sells < 100) f.push("thin flow");
+    const liq = p.liquidity?.usd ?? 0, mc = p.marketCap ?? p.fdv ?? 0, ageH = p.pairCreatedAt ? (now - p.pairCreatedAt) / 36e5 : NaN;
+    const h1 = p.txns?.h1 ?? { buys: 0, sells: 0 };
+    const f = marketScreen(p, now);
     f.forEach((x) => (tally[x] = (tally[x] ?? 0) + 1));
     if (!f.length) survivors.push({ sym: p.baseToken.symbol, dex: p.dexId, mint: p.baseToken.address, ageH: +ageH.toFixed(1), liq: Math.round(liq), mcap: Math.round(mc), h1: p.priceChange?.h1, buys: h1.buys, sells: h1.sells, url: p.url });
   }
