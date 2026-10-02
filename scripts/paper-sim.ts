@@ -4,6 +4,8 @@
  * Two profiles run side by side on the same feed:
  *   strict   = production filters (market screen + full RugCheck gate)
  *   research = relaxed market screen + only HARD RugCheck vetoes; exists to measure what the strict filters reject.
+ *   gmgn     = GMGN trending (1h/5m) -> GMGN field filters -> full RugCheck gate (only if GMGN_API_KEY is set; read-only).
+ * GMGN rank snapshots are also stored in .trading-state/gmgn/rank-YYYY-MM-DD.jsonl as a research dataset.
  * Every event goes to .trading-state/paper/ledger.jsonl; Jev answers (if a key is set) are logged for later calibration.
  */
 import fs from "fs";
@@ -11,6 +13,8 @@ import { marketScreen, SCREEN } from "../src/trading/screenFilters";
 import { makeRugCheckGate } from "../src/trading/rugcheckGate";
 import { PaperBook, PAPER_DEFAULTS, FillEvent } from "../src/trading/paperBook";
 import { askMemeJev } from "../src/trading/memeJev";
+import { GmgnClient } from "../src/lib/gmgn";
+import { gmgnScreen, gmgnFeatures } from "../src/trading/gmgnFilter";
 
 const arg = (k: string, d: number) => { const i = process.argv.indexOf(k); return i >= 0 ? Number(process.argv[i + 1]) : d; };
 const minutes = arg("--minutes", 0), size = arg("--size", PAPER_DEFAULTS.sizeUsd);
@@ -24,6 +28,9 @@ const log = (o: object) => fs.appendFileSync(LEDGER, JSON.stringify(o) + "\n");
 const get = async (p: string) => { const r = await fetch("https://api.dexscreener.com" + p); if (!r.ok) throw new Error(`${p} ${r.status}`); return r.json() as Promise<any>; };
 const bestPairs = (pairs: any[]) => { const m = new Map<string, any>(); for (const p of pairs) { const k = p.baseToken?.address; if (k && (!m.has(k) || (p.liquidity?.usd ?? 0) > (m.get(k).liquidity?.usd ?? 0))) m.set(k, p); } return m; };
 const seen = new Set<string>();
+const gmgn = GmgnClient.fromEnv();
+fs.mkdirSync(".trading-state/gmgn", { recursive: true });
+let gmgnTick = 0;
 const print = (e: FillEvent) => console.log(`${new Date(e.at).toISOString().slice(11, 19)} ${e.profile.padEnd(8)} ${e.type.toUpperCase().padEnd(5)} ${e.symbol.padEnd(10)} px ${e.px.toPrecision(4)} $${e.usd.toFixed(2)} ${e.reason}`);
 
 async function scan() {
@@ -48,6 +55,23 @@ async function scan() {
   }
 }
 
+async function scanGmgn() {
+  if (!gmgn) return;
+  const interval = gmgnTick++ % 2 ? "5m" : "1h";
+  const items = await gmgn.rank("sol", interval);
+  const now = Date.now(), day = new Date(now).toISOString().slice(0, 10);
+  fs.appendFileSync(`.trading-state/gmgn/rank-${day}.jsonl`, items.map((t: any) => JSON.stringify({ ts: now, interval, ...gmgnFeatures(t), fails: gmgnScreen(t, now) })).join("\n") + "\n");
+  const pass = items.filter((t: any) => !gmgnScreen(t, now).length && !book.positions.has(`gmgn:${t.address}`));
+  for (const t of pass) {
+    const rc = await gate(t.address);
+    log({ type: "candidate", source: "gmgn", at: now, mint: t.address, symbol: t.symbol, rugcheck: rc, gmgn: gmgnFeatures(t) });
+    if (!rc.pass) { console.log(`gmgn veto ${t.symbol}: ${rc.failures.join(" | ")}`); continue; }
+    const e = book.open(t.address, t.symbol, "gmgn", { px: Number(t.price), liqUsd: Number(t.liquidity) }, now, { gmgn: gmgnFeatures(t) });
+    if (e) { log(e); print(e); }
+  }
+  console.log(`gmgn ${interval}: ${items.length} ranked, ${pass.length} passed GMGN filters`);
+}
+
 async function markAll() {
   const open = [...book.positions.values()].filter((p) => !p.closedAt); if (!open.length) return;
   const mints = [...new Set(open.map((p) => p.mint))], pairs: any[] = [];
@@ -56,13 +80,13 @@ async function markAll() {
   for (const p of open) { const q = best.get(p.mint); if (!q) continue; for (const e of book.mark(p.id, { px: Number(q.priceUsd), liqUsd: q.liquidity?.usd ?? 0, m5: q.txns?.m5 }, now)) { log(e); print(e); } }
 }
 
-const report = () => { for (const prof of ["strict", "research"]) console.log(`[${prof}] ${JSON.stringify(book.summary(prof))}`); };
+const report = () => { for (const prof of ["strict", "research", "gmgn"]) console.log(`[${prof}] ${JSON.stringify(book.summary(prof))}`); };
 (async () => {
-  console.log(`paper-sim: size $${size}, costs ${PAPER_DEFAULTS.feePct + PAPER_DEFAULTS.slippagePct}%/side, stop -${PAPER_DEFAULTS.stopPct}%, TP +25%/+60%, time stop ${PAPER_DEFAULTS.timeStopMin}m, Jev ${process.env.TYPESAFE_API_KEY || process.env.JEV_API_KEY ? "on (log only)" : "off"}`);
+  console.log(`paper-sim: size $${size}, costs ${PAPER_DEFAULTS.feePct + PAPER_DEFAULTS.slippagePct}%/side, stop -${PAPER_DEFAULTS.stopPct}%, TP +25%/+60%, time stop ${PAPER_DEFAULTS.timeStopMin}m, Jev ${process.env.TYPESAFE_API_KEY || process.env.JEV_API_KEY ? "on (log only)" : "off"}, GMGN ${gmgn ? "on (read-only)" : "off"}`);
   const end = minutes ? Date.now() + minutes * 60_000 : Infinity;
   let lastScan = 0, lastReport = Date.now();
   while (Date.now() < end) {
-    try { if (Date.now() - lastScan > 180_000) { lastScan = Date.now(); await scan(); } await markAll(); } catch (e) { console.log("loop error:", (e as Error).message); }
+    try { if (Date.now() - lastScan > 180_000) { lastScan = Date.now(); await scan(); await scanGmgn().catch((e) => console.log("gmgn error:", (e as Error).message)); } await markAll(); } catch (e) { console.log("loop error:", (e as Error).message); }
     if (Date.now() - lastReport > 300_000) { lastReport = Date.now(); report(); }
     await new Promise((r) => setTimeout(r, 20_000));
   }

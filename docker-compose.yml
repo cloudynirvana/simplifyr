@@ -17,3 +17,16 @@ services:
       timeout: 5s
       retries: 3
       start_period: 90s
+
+  paper:
+    build: .
+    command: ["tsx", "scripts/paper-sim.ts"]   # strict + research (+ gmgn if GMGN_API_KEY set); paper only
+    restart: unless-stopped
+    env_file: /etc/pumpbot/env
+    volumes:
+      - /opt/pumpbot/state:/app/.trading-state
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
