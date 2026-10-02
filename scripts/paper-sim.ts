@@ -62,11 +62,17 @@ async function scanGmgn() {
   const now = Date.now(), day = new Date(now).toISOString().slice(0, 10);
   fs.appendFileSync(`.trading-state/gmgn/rank-${day}.jsonl`, items.map((t: any) => JSON.stringify({ ts: now, interval, ...gmgnFeatures(t), fails: gmgnScreen(t, now) })).join("\n") + "\n");
   const pass = items.filter((t: any) => !gmgnScreen(t, now).length && !book.positions.has(`gmgn:${t.address}`));
+  // Enter at the SAME source used for marking (DexScreener). Mixing GMGN entry liquidity with DexScreener marks faked rug exits.
+  const dexPairs: any[] = [];
+  for (let i = 0; i < pass.length; i += 30) dexPairs.push(...(await get(`/tokens/v1/solana/${pass.slice(i, i + 30).map((t: any) => t.address).join(",")}`).catch(() => [])));
+  const dex = bestPairs(dexPairs);
   for (const t of pass) {
+    const q = dex.get(t.address);
+    if (!q) { console.log(`gmgn skip ${t.symbol}: no DexScreener pair to mark against`); continue; }
     const rc = await gate(t.address);
     log({ type: "candidate", source: "gmgn", at: now, mint: t.address, symbol: t.symbol, rugcheck: rc, gmgn: gmgnFeatures(t) });
     if (!rc.pass) { console.log(`gmgn veto ${t.symbol}: ${rc.failures.join(" | ")}`); continue; }
-    const e = book.open(t.address, t.symbol, "gmgn", { px: Number(t.price), liqUsd: Number(t.liquidity) }, now, { gmgn: gmgnFeatures(t) });
+    const e = book.open(t.address, t.symbol, "gmgn", { px: Number(q.priceUsd), liqUsd: q.liquidity?.usd ?? 0, m5: q.txns?.m5 }, now, { gmgn: gmgnFeatures(t) });
     if (e) { log(e); print(e); }
   }
   console.log(`gmgn ${interval}: ${items.length} ranked, ${pass.length} passed GMGN filters`);

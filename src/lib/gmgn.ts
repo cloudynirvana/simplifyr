@@ -38,7 +38,7 @@ export class GmgnClient {
   }
 
   /** Trending ranking (up to 100). interval: 1m|5m|1h|6h|24h. extra: e.g. { orderby: "volume" } passes through unchanged. */
-  async rank(chain: string, interval: string, extra: Query = {}): Promise<any[]> { const d = await this.req("GET", "/v1/market/rank", { chain, interval, ...extra }); return d?.rank ?? []; }
+  async rank(chain: string, interval: string, extra: Query = {}): Promise<any[]> { const d = await this.req("GET", "/v1/market/rank", { chain, interval, limit: 100, ...extra }); return d?.rank ?? []; } // API default is only 10
   async trenches(chain: string, types: string[] = ["new_creation", "near_completion", "completed"], limit = 80): Promise<{ new_creation?: any[]; pump?: any[]; completed?: any[] }> {
     return (await this.req("POST", "/v1/trenches", { chain }, { type: types, limit })) ?? {};
   }
