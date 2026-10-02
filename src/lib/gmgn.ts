@@ -42,6 +42,16 @@ export class GmgnClient {
   async trenches(chain: string, types: string[] = ["new_creation", "near_completion", "completed"], limit = 80): Promise<{ new_creation?: any[]; pump?: any[]; completed?: any[] }> {
     return (await this.req("POST", "/v1/trenches", { chain }, { type: types, limit })) ?? {};
   }
+  /** Top holders (max 100). Items carry addr_type (0 wallet, 1 burn, 2 DEX pool), amount_percentage, maker_token_tags
+   *  (bundler / rat_trader / sniper / creator / whale) and tags (fresh_wallet / wash_trader / smart_degen / kol). */
+  async holders(chain: string, address: string, limit = 100, tag?: string): Promise<any[]> {
+    const d = await this.req("GET", "/v1/market/token_top_holders", { chain, address, limit, ...(tag ? { tag } : {}) });
+    return Array.isArray(d) ? d : d?.list ?? [];
+  }
+  /** Read-only swap quote (normal auth; moves nothing). amount in smallest units; slippage integer percent. */
+  async quote(chain: string, from: string, inputToken: string, outputToken: string, amountRaw: string, slippage: number): Promise<any> {
+    return this.req("GET", "/v1/trade/quote", { chain, from_address: from, input_token: inputToken, output_token: outputToken, input_amount: amountRaw, slippage });
+  }
   async tokenSecurity(chain: string, address: string): Promise<any> { return this.req("GET", "/v1/token/security", { chain, address }); }
   async tokenInfo(chain: string, address: string): Promise<any> { return this.req("GET", "/v1/token/info", { chain, address }); }
   async createdTokens(chain: string, wallet: string): Promise<any> { return this.req("GET", "/v1/user/created_tokens", { chain, wallet_address: wallet }); }

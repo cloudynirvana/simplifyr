@@ -1,262 +1,204 @@
-# Handoff: PumpPortal / memecoin trading system
+# Handoff: GMGN + Jev + Claude Code memecoin research and paper-trading system
 
-Branch: `claude/dexscreener-jev-api-on69u1` (all work is committed and pushed).
-Written 2026-10-01. Read section 1 first.
-
----
-
-## 1. Bottom line (read this first)
-
-- **Nothing built so far has shown a profitable edge.** Every strategy tested failed its quality gates. That is a normal, honest result and the system is designed to say "no trade" most of the time.
-- **What exists is a research and risk platform, not a money machine.** It can screen tokens, veto rugs, backtest with realistic costs, size positions, paper trade, and review its own calibration. It cannot yet trade live, and that is deliberate.
-- **"Passive income" is the wrong frame.** Treat all capital as experiment money you can lose completely. The correct goal for the next 4-8 weeks is to *find out whether an edge exists*, cheaply, not to compound.
-- **Profit accumulation comes last and is mechanical:** scale only after a measured, positive, after-cost track record; withdraw profits on a schedule; never add capital to chase losses (section 8).
+Repo `cloudynirvana/simplifyr`, branch `claude/dexscreener-jev-api-on69u1`. Rewritten 2026-10-02 after the decision to go **GMGN-exclusive** (no PumpPortal, no Telegram). Read section 1 first.
 
 ---
 
-## 2. Verified results so far
+## 1. Bottom line
 
-| Test | Result |
-|---|---|
-| Solana SOL/USDC hourly backtest (3 simple strategies, 0.8%/side costs, out-of-sample) | All 3 failed. OOS returns -9.2%, -4.0%, -3.2% vs buy&hold +12.3%. |
-| pump.fun-style market screen, 59 newest DexScreener Solana profile/boost tokens | 57 failed market-data filters; 2 passed. |
-| RugCheck + insider-network gate on those 2 (HI, BSI) | Both rejected: linked insider wallets held 8.1% / 8.3% combined, 6-wallet identical-balance cluster (HI), creator rug history (BSI). RugCheck's own score for HI was a clean 1. |
-| Hyperliquid perps tournament, top-20 markets, 20 configs, walk-forward + untouched 180-day holdout + 2x-cost stress + deflated Sharpe | No strategy passed. Best: cross-sectional momentum WF Sharpe 0.58 (gate 1.0). |
-| Hyperliquid memecoin-perp tournament, 11 coins, 15 bps slippage | No strategy passed. Equal-weight long basket lost 59% over the OOS window; DOGE alone -15%. |
-| Machinery tests | 0 lookahead leaks across all configs; cost and funding signs correct; deflated Sharpe separates noise from planted edge; pure noise passes nothing. |
-
-Interpretation: simple public strategies do not beat costs here. Memecoins decay on average. The filters correctly reject most tokens, including ones a headline safety score called clean.
+- **The system is a research and paper-trading platform. Nothing has shown a profitable edge yet.** Short live paper runs so far are a handful of trades and net slightly negative. That is too little data to conclude anything either way.
+- **Direction:** GMGN is the only data source (and, later, the only execution venue). Jev gives fast, logged judgments. Claude Code designs, reviews and operates. Deterministic code owns every money decision.
+- **Current mode:** paper only, with a **read-only** GMGN key. Live trading needs a separate GMGN trading key, created only after the go-live gates in section 7 pass and you approve in writing.
+- **"It works profitably"** will only be claimed when the record meets the pre-registered rule in `docs/EXPERIMENTS.md`: at least 100 trades, positive after costs, and positive in at least 3 of 4 weeks.
 
 ---
 
-## 3. Architecture
+## 2. Roles
+
+| Piece | Role | Speed | Notes |
+|---|---|---|---|
+| GMGN OpenAPI | Data now (trending, security, holders, token info, quotes); execution later (swaps with server-side TP/SL/trailing) | ~200–700 ms per call; ~10 req/s limit | Read-only key = no trading possible |
+| Jev (TypeSafe System One) | Fast typed judgments on tokens that passed every filter: rug risk, direction, setup quality | ~200 ms median (measured) | **Log-only.** Gates nothing until it beats the base-rate Brier score on ≥100 outcomes |
+| Bot code (`gmgn-sim`) | The "hands": 24/7 loop, filters, sizing, exits, ledger | Seconds | Runs in Docker on the VPS |
+| Claude Code | The "brain", offline: builds code, reviews research, proposes pre-registered changes, operates the server via skills | Hours/days | Never in the per-trade path; never holds keys |
+
+---
+
+## 3. What runs (GMGN pipeline)
 
 ```
-PumpPortal websocket ──► PumpTracker ──► market screen ──► RugCheck gate ──► Jev gate ──► sizing ──► Executor
- (new tokens + trades)   (per-token         (liquidity,        (authorities,      (typed        (quarter    (PAPER now;
-                          holders, dev,      flow, age,         insider nets,      judgments;    Kelly, risk  Jupiter-quote
-                          flow, fees est.)   late-entry)        bundles, LP lock)  code owns     limits)      fills)
-                                                                                    thresholds)
-                       ▲                                                                              │
-                       └────────────── position manager (NOT BUILT): watches held token, rug-exit ◄───────┘
-Risk layer (src/trading/risk.ts) sits above everything: max drawdown 15%, daily loss, stop-loss, position caps, kill switch.
-Nightly review (calibration, Brier) proposes changes; a human approves. Nothing self-modifies.
+GMGN /v1/market/rank (sol, 1h & 5m, 100 tokens, every ~60 s)
+  -> gmgnScreen (field filters)            src/trading/gmgnFilter.ts
+  -> GMGN /v1/token/security               src/trading/gmgnChecks.ts  securityScreen
+  -> GMGN /v1/market/token_top_holders     src/trading/gmgnChecks.ts  holderScreen
+  -> Jev (log only)                        src/trading/memeJev.ts
+  -> paper entry in 3 exit profiles        src/trading/paperBook.ts  (same entries, different exits)
+marks: GMGN /v1/token/info every 20 s      src/trading/gmgnEngine.ts markOpen
+labels: real return at +60 m and +240 m for every checked candidate (+10% sample of screen rejects)
 ```
 
-Principles that must be preserved:
-1. **Code owns thresholds, sizes and side effects.** The judgment model (Jev) only supplies typed, calibrated answers. It can never override the risk layer.
-2. **Fail closed.** Any error (RugCheck, Jev, quote) means no entry.
-3. **Paper by default.** `TRADING_MODE=live` throws. Live execution is intentionally unimplemented.
-4. **Hard filters are vetoes, not scores.** A token failing any filter is never shown to the model.
+**Filters (all vetoes; thresholds live in one file each):**
+- **Field filters:**
+  - Liquidity at least $25k, market cap at least $50k, holders at least 300.
+  - Age between 30 minutes and 48 hours.
+  - Rug ratio at most 0.3, bundlers at most 25%, top 10 at most 30%.
+  - Dev at most 5%, rat traders at most 5%, top-70 sniper holdings at most 10%, entrapment at most 0.1.
+  - Not a honeypot, not wash-traded, mint and freeze renounced.
+  - Not over +300% in 1 hour.
+  - No entry after a drop of 10% or more in 5 minutes (GMGN's own hard stop).
+  - Buy/sell ratio at most 8.
+- **Security:** honeypot, cannot-sell, unrenounced mint or freeze, tax over 10%, blacklist.
+- **Holders** (wallets only; pools with `addr_type` 2 and burn addresses with `addr_type` 1 are excluded):
+  - Top wallet at most 5% and top 10 wallets at most 30%.
+  - Bundler, rat-trader and sniper wallets together at most 10%, creator at most 5%.
+  - No cluster of 6 or more wallets with identical balances.
+
+**Exit profiles (pre-registered, `docs/EXPERIMENTS.md`):**
+
+| Profile | Stop-loss | Take-profit | Trailing stop | Time limit |
+|---|---|---|---|---|
+| base | −12% | ½ at +25%, then ½ at +60% | none | 2 h |
+| wide | −20% | ½ at +25%, then ½ at +60% | none | 3 h |
+| trail | −15% | none | arms at +20%, exits 15% below the peak | 4 h |
+
+**Rug triggers in every profile:** a liquidity drop of more than 20% from the first mark, or 5-minute sell volume more than 1.5× buy volume. Costs are 1% fee plus 3% slippage per side.
+
+**Ledger:** `/opt/pumpbot/state/gmgn-paper/ledger.jsonl`. It contains snapshots, candidates, fills, outcomes, summaries and a one-time `schema` row.
+
+**Heartbeat:** `/opt/pumpbot/state/heartbeat.json`. It holds the funnel counts, veto counts, `markMiss`, `outcomes` and per-profile summaries. Docker's healthcheck reads it.
 
 ---
 
-## 4. What is built (file map and status)
+## 4. Verified vs unverified
 
-Status key: **T** = tested with mocks/synthetic data, **L** = verified against live data, **U** = unverified assumption inside.
+**Verified live (2026-10-02):**
+- GMGN read-only auth works: `X-APIKEY` header plus `timestamp` and `client_id`. No signing is needed for data.
+- `/v1/market/rank` returns 95 fields per token. The default is 10 rows, so the client asks for 100.
+- `/v1/token/security` works.
+- `/v1/trenches` hit a 429 when called in a burst. The client now spaces calls and waits out `X-RateLimit-Reset`.
+- The Jev API works with both keys: 5 typed questions in ~160–300 ms, model `jev-1.13.0`.
+- The paper book's exits are tested: TP ladder, stop, trailing stop, time stop, liquidity and sell-pressure rug triggers, and the duplicate guard.
+- The GMGN engine is tested end to end with mocked GMGN responses: funnel stages, paired profiles, outcome labelling and the research report.
 
-### Pump.fun / Solana (the PumpPortal path)
-| File | Purpose | Status |
-|---|---|---|
-| `src/lib/pumpportal.ts` | Read-only websocket feed (new tokens, per-token trades), reconnect + backoff, queued subscriptions | T, L. **Verified live (2026-10-01): the `create` event fields match; the websocket DOES work from the sandbox with `NODE_USE_ENV_PROXY=1`. The per-token trade stream is NOT keyless: it needs an API key whose wallet holds >= 0.02 SOL.** Trade-event shape still unverified. |
-| `src/trading/pumpTracker.ts` | Builds filter inputs from events: age, buy/sell counts, unique traders, holders, dev holdings/sells, price change | T; **U**: supply=1B, fees ~1% of volume, liquidity = virtual SOL - 30, authorities *assumed* revoked |
-| `src/trading/pumpFilters.ts` | Hard filters + execution caps (slippage <=15%, impact <=5%, tip <=2% of order) | T |
-| `src/trading/screenFilters.ts` | Market-data screen for DexScreener pairs, incl. lopsided-flow rule (buys/sells > 8) | T, L |
-| `src/lib/rugcheck.ts`, `src/trading/rugcheckFilter.ts`, `src/trading/rugcheckGate.ts` | RugCheck.xyz report -> veto (insider networks >5% combined, creator >5%, LP lock <90%, top holder >5%, bundle cluster, authorities, danger risks); cached, 3 s spacing, fails closed | T, L |
-| `src/lib/dexscreener.ts` | Search, pair, token-pairs | L |
-| `src/lib/jupiter.ts`, `src/trading/jupiterPaper.ts` | Read-only quote client; paper executor that fills at real quotes and refuses >5% impact | T; **U**: endpoints/fields from memory |
-| `scripts/pump-scan.ts`, `src/trading/discovery.ts`, `src/trading/discoveryScan.ts` | **Discovery + HTTP scanner (no paid key):** free PumpPortal new-token stream -> wait for 30m/1h/2h/4h/8h checkpoints -> DexScreener market screen (batched 30 mints/call) -> RugCheck gate (holders, insider networks, authorities, LP lock; fails closed) -> every market-passer logged to `.trading-state/pump-candidates.jsonl` with its RugCheck verdict. Writes `heartbeat.json`. | T (mock tests incl. 429 retry); L (live: 166 tokens checked against DexScreener, 0 errors; all failed filters as expected at <30 min age). Never yet produced a real candidate. |
-| `scripts/screen-dex.ts` | One-shot HTTP screen (works anywhere): DexScreener feeds -> market filters -> RugCheck | L |
-| `scripts/trade-sheet.ts <mint>` | Runs every filter on one mint; writes a filled manual entry/exit sheet only if it passes (`--demo` previews format) | T, L |
-
-### Decision layer / agent
-| File | Purpose | Status |
-|---|---|---|
-| `src/trading/state.ts` | Causal numeric snapshot (<400 tokens) for the judgment model | T (causality verified) |
-| `src/trading/jevPolicy.ts` | Gate policy: setup quality >=2, direction confidence >0.80 & long, toxic flow <=0.5, risk_state safe, escalate on crisis or confidence <0.6, quarter-Kelly sizing capped 25% | T; payoff ratio 1.5 is a **placeholder** |
-| `src/trading/agent.ts` | Tick loop: signal -> Jev gate -> risk -> execute; fail closed; decision log | T |
-| `src/trading/risk.ts` | Limits: position 25%, stop 12%, daily loss 5%, max drawdown **15%**, min liquidity $100k, order <=0.5% of liquidity | T |
-| `src/trading/calibration.ts`, `scripts/nightly-review.ts` | Brier score vs base-rate, calibration bins, report with *proposed* changes only | T |
-| `src/lib/jev.ts`, `src/agents/tradingResearch.ts`, `pages/api/research/run.ts` | Research agent (planner/researcher/builder/reviewer/router) | T; uses the older fetch-based Jev client |
-
-### Backtesting / research
-| File | Purpose | Status |
-|---|---|---|
-| `src/trading/backtest.ts`, `strategies.ts`, `pages/api/trading/backtest.ts` | Single-asset hourly backtester with costs, IS/OOS split, quality gates | T, L |
-| `src/lib/geckoterminal.ts` | Paginated OHLCV with 429 backoff | L |
-| `src/lib/hyperliquid.ts`, `scripts/fetch-hl.ts` | Hyperliquid public API: markets, candles, funding; cache in `.trading-state/hl*/` | L |
-| `src/research/{panel,engine,strategies,stats,tournament}.ts`, `scripts/tournament.ts` | Perp portfolio backtester (fees, slippage, actual funding, vol targeting), 6 strategies / 20 configs, walk-forward, holdout, 2x-cost stress, deflated Sharpe | T, L |
-
-### Not built
-- **Position manager with rug-exit logic** (the speed-critical piece).
-- **Live signer / executor** (PumpPortal trade API or Jupiter-built transactions). `getExecutor()` throws in live mode.
-- **Telegram alerts and command bot.**
-- **Helius reads** (true holders, authorities, deployer history) to replace approximations.
-- **Jev SDK wiring** (blocked, see section 9).
-- **Hyperliquid data recorder** (order book, trades, liquidations).
-- **Deploy scripts** (Dockerfile / systemd units / server hardening).
+**Not yet verified (check on the server first):**
+- The shape of `/v1/token/info`, which supplies the marks for open positions. `extractMark` assumes `price.price`, `liquidity`, `price.buy_volume_5m` and `price.sell_volume_5m`. The engine logs one `schema` row. **If `markMiss` climbs in the heartbeat, fix `extractMark`.**
+- The `/v1/market/token_top_holders` fields `addr_type`, `amount_percentage` and `maker_token_tags`, taken from GMGN's own analyzer code and not yet seen live.
+- `/v1/trade/quote`, which needs only the read key but wants a `from_address`. It's not used yet, so paper fills use rank price plus a fixed 4% cost.
+- Real fill costs on thin pools. Paper results are an upper bound.
 
 ---
 
-## 5. Verified facts vs assumptions
+## 5. Results so far (honest)
 
-**Verified live:** PumpPortal new-token websocket (create events) and the trade-stream key requirement; Hyperliquid info API (178 perps, candles, funding); DexScreener; GeckoTerminal; RugCheck report API (keyless); Jev/TypeSafe API host reachable and requires a key; main Raydium SOL/USDC pool data.
-
-**Not verified (must check before relying on them):**
-- PumpPortal trade-event field names (create events verified); rate limits; whether it restricts datacenter IPs.
-- Jupiter quote endpoints/fields; whether Jupiter limit/trigger orders support stop-loss for pumpswap tokens.
-- Hyperliquid fee tiers and any US-IP / jurisdiction restrictions (I believe both Hyperliquid and Bybit restrict US access; confirm before choosing a US server).
-- That Hyperliquid API wallets can trade but not withdraw (my understanding; confirm in docs).
-- All prices/stock in the VPS comparison (pasted from elsewhere with citations I could not see).
-- `@typesafe-ai/sdk` request shape: types were read (`choice`/`score`/`noul`, `client.systemOne({state, questions, model})`), but no real authenticated call has been made.
-
-**Known biases:** Hyperliquid universe = today's listings (survivorship flatters results); profile/boost feeds on DexScreener are paid promotion (selection bias); costs are assumptions (taker 4.5 bps + slippage 5-15 bps for perps; 0.8%/side for Solana spot).
+- **Early pre-GMGN runs** (PumpPortal, DexScreener and RugCheck):
+  - The strict filters took 0 trades.
+  - Relaxed and GMGN-plus-RugCheck profiles produced about 13 paper trades, net slightly negative.
+  - Several stop-losses fired within minutes of entry.
+- **GMGN trending sample:**
+  - Most trending tokens are too young (under 30 minutes) or already up more than 300% in the hour.
+  - About 1 in 20 pass the field filters.
+  - The RugCheck holder checks then rejected most of those survivors, for insider networks and bundled wallets. The GMGN holder check now has to do that job.
+- **Perpetual-futures research** (Hyperliquid tournament, legacy): no strategy passed the gates. Memecoin perps lost 59% on an equal-weight long basket over the test window.
 
 ---
 
-## 6. Recommended setup (infrastructure)
+## 6. Server runbook (VPS, user `deploy`, repo at `/opt/pumpbot`)
 
-**Principle:** at this stage nothing is raced. Filters only consider tokens >= 30 min old, so server latency is secondary. Choose reliability, a location that avoids jurisdiction problems, and low cost.
+Done already: hardened Ubuntu 24.04 (key-only SSH, root login off, firewall allows port 22 only), Docker, and the repo cloned.
 
-1. **Server:** small VPS, 1 vCPU / 2 GB is plenty. Prefer a **European** location (Frankfurt/Amsterdam on Vultr, or Helsinki/Falkenstein on Hetzner): avoids possible US-IP restrictions for exchange APIs, good Solana validator/RPC proximity, lower SSH latency from Nigeria. Monthly billing, **no backups add-on**, no prepaying. Ubuntu 24.04, SSH keys only.
-2. **RPC:** choose the RPC endpoint *after* the server, in the same region. Start on a free Helius tier (key already referenced in `.env.local.example`). Use it for holders/authorities/deployer history.
-3. **Runtime:** Node 22, run scripts under `systemd` (auto-restart) or `pm2`. Docker is optional, not needed.
-4. **Process layout:**
-   - service A: `scripts/pump-scan.ts` (scanner, paper)
-   - service B: Hyperliquid data recorder (backlog)
-   - cron: `scripts/nightly-review.ts` daily
-   - alerting: Telegram bot (backlog); until built, tail the candidates file.
-5. **Secrets:** a root-owned env file (mode 600) loaded by systemd; never in git, never in chat. Dedicated trading wallet funded by hand with a small amount; the server must have no path to withdraw to other addresses.
-6. **Network note for this dev sandbox:** HTTP APIs and WebSockets work with `NODE_USE_ENV_PROXY=1` (an earlier claim here that WebSockets are blocked was wrong: the handshake test omitted that flag). The sandbox is ephemeral, so the 24/7 scanner still belongs on the VPS.
-7. **PumpPortal trade stream needs a funded key (verified live; tested again 2026-10-02 with a user-supplied key: connection accepted, trade stream still denied).** The scanner NO LONGER depends on it: it uses the free new-token stream for discovery and DexScreener + RugCheck over HTTP for flow and holders. Create a fresh PumpPortal API key and fund its wallet with the minimum (>= 0.02 SOL, about $2). That wallet is controlled by PumpPortal's Lightning service, so treat it as spent money, never fund it further, and never reuse a key that was pasted in chat. Alternative without PumpPortal custody: subscribe to pump.fun program logs through Helius and parse trades on-chain (more work, no custody). Until one of these exists, holder/flow filters have nothing to work on for fresh pump.fun tokens; the DexScreener-based `screen-dex.ts` path (migrated tokens) still works.
-8. **Monitoring:** healthcheck that the websocket is receiving events; alert if no events for >5 min; log rotation; daily summary of candidates, vetoes by reason, paper PnL, kill-switch state.
+**Switch to GMGN-only (one time):**
+1. `cd /opt/pumpbot && git pull`
+2. `sudo nano /etc/pumpbot/env`. The file should contain only `GMGN_API_KEY=…` (the read-only key) and optionally `TYPESAFE_API_KEY=…`. Remove the Telegram and PumpPortal lines. The current GMGN key and Jev key were pasted in chat, so create fresh ones and type them here.
+3. `bash deploy/finish.sh`. This fixes permissions and builds and starts the single `gmgn` service. It also removes the old PumpPortal containers, disables the retired Telegram watchdog, and prints status.
+4. `sudo reboot` once, since a kernel update is pending. The service restarts by itself.
 
----
+**Daily checks:**
+- `docker compose ps` should show `gmgn` as healthy.
+- `cat /opt/pumpbot/state/heartbeat.json` shows the funnel, vetoes, `markMiss` and profiles.
+- `docker compose exec gmgn tsx scripts/gmgn-research.ts` prints the full research report.
 
-## 7. Operating procedure
-
-**Phase 0: now (free, manual):**
-- `NODE_USE_ENV_PROXY=1 npx tsx scripts/screen-dex.ts` (screen + RugCheck gate).
-- For any passing mint: `npx tsx scripts/trade-sheet.ts <mint> --size-usd 15 --capital <yours>`; fills the manual sheet only on a pass. Keep a trade log; compare what the filters missed.
-- Expect most runs to pass nothing. That is the filters working.
-- Timing is unknown; run at several times for a week and log pass rates before assuming "best hours".
-
-**Phase 1: VPS scanner (about 1-2 weeks):**
-- Run `pump-scan.ts` 24/7. First goal is fixing the tracker against real events (field names), then collecting candidates + veto reasons.
-- Add Helius reads so holders/authorities are real, not assumed.
-
-**Phase 2: autonomous paper trading (about 2+ weeks):**
-- Build position manager + rug-exit + Telegram alerts + Jev wiring. Fill with `JupiterPaperExecutor` (real quotes, pessimistic slippage).
-- Nightly review. Paper results are an *upper bound*; live fills on fast tokens are worse.
-
-**Phase 3: live micro-stake:**
-- Dedicated wallet with only what you can fully lose (e.g. $25-50 total, $2-5 per position).
-- Build the signer; first action is one micro-trade to test the path. Per-trade and per-day spend caps enforced in code.
-
-**Phase 4: scale only on evidence** (section 8).
-
-### Go-live gates (all must hold; may never be met)
-- >= 100 paper trades or >= 4 weeks, whichever is later.
-- Positive expectancy **after** pessimistic costs; profit factor >= 1.3; max drawdown <= 15%.
-- Rug-exit tests pass in replay (see backlog).
-- If Jev is used: Brier score beats the base-rate baseline on >= 100 scored decisions.
-- Kill switch, fail-closed paths, and spend caps verified in tests.
-- Your explicit written approval.
+**Claude Code on the server:**
+- Start it with `cd /opt/pumpbot && claude`.
+- The project skills arrive with `git pull`: `paper-trading-ops`, `paper-review` and `token-due-diligence`.
+- **GMGN's official skills plugin:** `/plugin marketplace add GMGNAI/gmgn-skills` then `/plugin install gmgn-cli@gmgn-cli`.
+  - These need Node, `npm i -g gmgn-cli`, and `~/.config/gmgn/.env` containing **only** `GMGN_API_KEY=…` (mode 600).
+  - Never add `GMGN_PRIVATE_KEY` or `GMGN_ALLOW_AUTOMATED_TRADES` while paper trading.
+  - With a read-only key and no private key, the swap, buy and cooking skills cannot trade.
 
 ---
 
-## 8. Profit accumulation policy (the part that actually matters)
+## 7. Go-live gates (all required; may never be met)
 
-1. **Measure expectancy, not wins.** Expectancy per trade = win% x avg win - loss% x avg loss, after fees, tips, failed transactions and slippage. Don't judge on fewer than ~100 trades; a streak of wins on a handful of trades means nothing.
-2. **Position size is the survival variable.** Keep the 2%-of-capital-per-position rule and the 12% stop. Quarter-Kelly is a *cap*, and Kelly needs a measured payoff ratio (currently a placeholder of 1.5).
-3. **Scale rule:** increase stake by at most ~1.5x only after each ~50 additional trades with positive after-cost expectancy and no kill-switch event. Any halt, or drawdown beyond 15%, resets to the smallest stake and triggers a review.
-4. **Skim profits:** every week, move realised profit above the starting stake out of the trading wallet to cold storage or fiat. Never top the wallet up after a loss streak.
-5. **Hard stop:** if cumulative loss reaches your pre-declared budget (decide it now, in writing), stop trading and review before any further deposit.
-6. **Costs scale against small stakes:** a fixed priority fee/tip is a large % of a tiny order (the code refuses tips >2% of order). Profit on a very small stake will be tiny even if the strategy works; that is a reason to prove the edge first, not to size up early.
-7. **Tax/legal:** keep the trade log (it doubles as a tax record). Check your jurisdiction's rules for crypto gains and for the venues you use.
+1. One profile meets the rule in `docs/EXPERIMENTS.md`:
+   - At least 100 closed trades, expectancy above 0 after costs, and profit factor at least 1.3.
+   - Maximum drawdown at most 15% of deployed capital, and positive in at least 3 of 4 consecutive weeks.
+   - The result holds again on a later, fresh period.
+2. Rug triggers are observed firing correctly in the ledger, and `markMiss` stays near 0.
+3. If Jev is to gate entries: its Brier score beats the base rate on at least 100 outcomes.
+4. Your explicit written approval.
 
----
-
-## 9. Pending decisions and blockers
-
-| Item | Owner | Notes |
-|---|---|---|
-| Allow `@typesafe-ai/sdk` integration | User | Previous attempts were blocked by the tool-permission classifier ("untrusted code integration"). The package was installed locally then reverted from `package.json`. Needs an explicit allow (or a Bash permission rule). Wiring is ~60 lines: question definitions (regime, direction, toxic_flow, setup_quality, risk_state), `getJudge()`, and the research router. Pin model `jev-1.13.0`. |
-| VPS purchase and region | User | Recommended: Vultr `vc2-1c-2gb` in Frankfurt or Amsterdam (verify price/stock in cart), monthly, no backups. |
-| Helius key as env var on the server | User | Never paste it in chat. |
-| Telegram bot token + chat ID | User | Via BotFather, as server env vars. Command whitelist by chat ID. |
-| Risk budget in writing | User | Total stake, per-trade size, max loss before stopping. |
-| Sources of truth for PumpPortal/Jupiter | Claude | Verify field names/endpoints against live responses once the VPS runs. |
+**Then, live (separate build, not done yet):**
+- **Trading key:** a **new** GMGN key with trading enabled, IP-locked to `216.128.146.99`, bound to a dedicated wallet funded only with the loss budget. The private signing key stays only on the server (mode 600).
+- **Order placement:** a GMGN swap with attached strategy orders (stop-loss, take-profit, trailing), which execute server-side even if the bot is down.
+- **Hard caps in code:** per trade and per day, plus a kill switch.
+- **First live step:** a single micro-trade.
 
 ---
 
-## 10. Security and key hygiene (urgent)
+## 8. Capital and profit policy
 
-- **Several secrets were pasted into the chat** during this project (API keys of unknown services, a TypeSafe/Jev key, strings that may include wallet credentials, an "oanor_live_" rug-check key). Treat all of them as exposed: **rotate them**, and if any string could control a wallet, move the funds.
-- Only these keys were ever written to disk, in the sandbox container's gitignored `.env.local` (ephemeral): `JEV_API_KEY`, `TYPESAFE_API_KEY`, `DEXSCREENER_DEFAULT_PAIR`. None are in git (checked repeatedly with `git grep`).
-- Going forward: keys are entered directly on the server into a protected env file. Wallet key only on the server, dedicated wallet, small balance. Exchange keys (if any): trade permission only, **no withdrawal**, IP-allowlisted to the server, sub-account with limited funds.
-- Do not install or run third-party "agent harness" tools (e.g. AgenKit) or add third-party MCP connectors with trade scope (e.g. OpenMarket trade-through-tab) to a system that touches funds.
-- The tool-permission classifier blocked fetching code from outside repos; respect that boundary.
-
----
-
-## 11. Backlog (ordered)
-
-**P0 before any money**
-1. Run `pump-scan.ts` on the VPS; reconcile real PumpPortal events with `PortalEvent`/`PumpTracker` (field names, units, supply, `pool` values for migration).
-2. Helius reads: holders, authorities, deployer history; replace assumed fields.
-3. Trade log schema + weekly analysis script (veto reasons histogram, pass rate by hour).
-4. Replay tests for the rug-exit rule on recorded token sequences (dev/top-holder sells, liquidity drops, sell pressure).
-
-**P1 autonomous paper**
-5. Position manager: monitors held token's trades; exit on dev sell, top-10 holder large sell, liquidity drop >20%, 5-min sells >1.5x buys, stop-loss, time stop, TP ladder.
-6. Telegram: alerts, `/status`, `/pause`, `/kill`, daily summary; chat-ID whitelist.
-7. Jev SDK wiring (after approval); calibration logging is already in place.
-8. Replace the placeholder payoff ratio with measured values from paper trades.
-
-**P2 research**
-9. Hyperliquid data recorder (L2 book, trades, funding, liquidations) for the top ~8 memecoin perps for 4-8 weeks; then test short-horizon order-flow/funding/liquidation hypotheses with the existing tournament machinery.
-10. Pre-register one forward test (e.g. "short a small memecoin-perp basket") with pass criteria written *before* running; run on Hyperliquid testnet. Every config added after seeing results raises the deflated-Sharpe penalty.
-11. Market-neutral funding carry (long spot / short perp) as a lower-return, economically grounded alternative.
-
-**P3 live**
-12. Signer service with per-trade/per-day caps; micro-trade first; wallet isolation; kill switch tested.
+- Size is the survival variable. Positions are $15 on paper. Live, start at $2–5 per trade, no more than 2% of the budget each.
+- Scale up by at most 1.5× only after each further 50 trades with positive expectancy after costs. Any halt, or a drawdown past 15%, resets to the smallest size.
+- Skim realised profit out of the trading wallet weekly. Never top the wallet up after a losing streak.
+- Decide the total loss budget in writing before going live, and stop when it's hit.
 
 ---
 
-## 12. Command cheat sheet
+## 9. Security (urgent items)
 
-```bash
-npm install
-npx tsc --noEmit                                   # typecheck (must stay clean)
-
-# Pump.fun / Solana
-NODE_USE_ENV_PROXY=1 npx tsx scripts/screen-dex.ts          # HTTP screen + RugCheck (works in the dev sandbox)
-NODE_USE_ENV_PROXY=1 npx tsx scripts/trade-sheet.ts <mint> --size-usd 15 --capital 1000 [--demo]
-npx tsx scripts/pump-scan.ts 150                   # live scanner; needs websocket (run on the VPS)
-npx tsx scripts/paper-trade.ts <pool> [network] [cash]      # strategy paper trader (single pool)
-npx tsx scripts/nightly-review.ts <pool> [network]          # calibration report
-
-# Hyperliquid research
-NODE_USE_ENV_PROXY=1 npx tsx scripts/fetch-hl.ts 20 2023-06-01
-NODE_USE_ENV_PROXY=1 npx tsx scripts/fetch-hl.ts --coins PUMP,DOGE,kPEPE,FARTCOIN,kBONK,PENGU,TRUMP,WIF,SPX,kSHIB,POPCAT --dir .trading-state/hl-meme
-npx tsx scripts/tournament.ts                                              # top-20 perps
-npx tsx scripts/tournament.ts --dir .trading-state/hl-meme --slip 15 --tag meme
-```
-`NODE_USE_ENV_PROXY=1` is only needed when running behind an HTTPS proxy (as in the dev sandbox). State/cache lives in `.trading-state/` (gitignored).
+- **Keys pasted in chat, treat as exposed and rotate:** GMGN read key, two TypeSafe/Jev keys, a RugCheck-type `oanor_live_` key, PumpPortal strings (one possibly a wallet secret), an older unknown API key. Move funds from any wallet whose secret was ever pasted.
+- **Never pasted, keep it that way:** the root password, SSH private key, GMGN signing key and wallet keys.
+- **Repo:** it's public and contains no secrets. I checked with `git grep` after every commit.
+- **Not allowed on the box:** third-party agent harnesses (AgenKit) and trade-scoped third-party connectors (OpenMarket trade-through-tab).
 
 ---
 
-## 13. Prompt for the next Claude session
+## 10. File map
 
-> You are continuing work on `cloudynirvana/simplifyr`, branch `claude/dexscreener-jev-api-on69u1`. Read `docs/HANDOFF.md` first. Hard rules: paper trading only; `TRADING_MODE=live` stays unimplemented until the go-live gates in section 7 are met and the user approves in writing; fail closed; code owns thresholds and the risk layer, the judgment model only supplies typed answers; never print, log, store in git, or ask for secrets (keys go in a server env file); never run or install third-party agent harnesses or add trade-scoped third-party connectors. Be honest about uncertainty: every claim about PumpPortal/Jupiter/Hyperliquid terms must be verified against live responses or docs. Next tasks are the P0 backlog items in section 11. Report results faithfully, including failures.
+**Active (GMGN path):**
+- `src/lib/gmgn.ts`: read-only client (rank, trenches, security, info, holders, created-tokens, quote).
+- `src/trading/gmgnFilter.ts`, `src/trading/gmgnChecks.ts`: filters and checks.
+- `src/trading/gmgnEngine.ts`: discover, mark and label.
+- `src/trading/paperBook.ts`: positions, exits and the trailing stop.
+- `src/trading/memeJev.ts`: Jev questions, log-only.
+- `scripts/gmgn-sim.ts`: the service entrypoint.
+- `scripts/gmgn-research.ts`: the research report.
+- `docs/EXPERIMENTS.md`: pre-registration.
+- `Dockerfile`, `docker-compose.yml`: the single `gmgn` service.
+- `deploy/setup-server.sh`, `deploy/finish.sh`, `deploy/env.example`: server setup.
+- `.claude/skills/*`: project skills.
+
+**Legacy (kept, not running):**
+- PumpPortal scanner: `src/lib/pumpportal.ts`, `src/trading/pumpTracker.ts`, `src/trading/discovery*.ts`, `scripts/pump-scan.ts`.
+- DexScreener, RugCheck, Jupiter and GeckoTerminal clients and filters.
+- `scripts/paper-sim.ts`, `scripts/screen-dex.ts`, `scripts/trade-sheet.ts`.
+- Hyperliquid research: `src/research/*`, `scripts/fetch-hl.ts`, `scripts/tournament.ts`.
+- Telegram watchdog: `deploy/watchdog.sh` and its timer.
+- The older agent and Jev policy (`src/trading/agent.ts`, `jevPolicy.ts`, `jevJudge.ts`, `state.ts`).
 
 ---
 
-## 14. Honest limits
+## 11. Next steps (ordered)
 
-- No edge has been demonstrated. The most likely outcome of the early phases is that the filters pass very few tokens and the paper results are flat or negative.
-- Backtests cannot capture bonding-curve fills, MEV/sandwiching, failed transactions, or insider behaviour that reacts to bots; paper results will flatter live results.
-- Rug-exit logic reduces damage; it cannot make rugs safe. Coordinated dumps can land within one block, so expect many exits at a loss.
-- Speed advantage over a human is real (seconds versus minutes) but small next to slot-landing variance (~400 ms) and competition from faster bots.
-- Past gates failing is information, not a bug. Do not loosen the gates to get a pass.
+1. On the server, switch to GMGN-only (section 6) and let it run.
+2. After about 1 hour, check that `markMiss` is about 0 and the `schema` row looks right. Fix `extractMark` if not. This is the most likely first bug.
+3. After about 1 day, run `gmgn-research.ts`: funnel, which rules reject most, whether rejected groups really do worse, and early profile results.
+4. Weekly, review against `docs/EXPERIMENTS.md`. Changes become new named, dated profiles, never edits to running ones.
+5. Optional: quote-based fills (`/v1/trade/quote` with any public `from_address`) to replace the fixed 4% cost estimate. Use the trenches endpoint as a second discovery source.
+6. Only after the gates pass: build the live executor (section 7).
+
+---
+
+## 12. Prompt for the next Claude session
+
+> Continue `cloudynirvana/simplifyr` on branch `claude/dexscreener-jev-api-on69u1`. Read `docs/HANDOFF.md` and `docs/EXPERIMENTS.md` first. GMGN-exclusive: no PumpPortal, no Telegram. Paper only, with a read-only GMGN key. Never add GMGN_PRIVATE_KEY or GMGN_ALLOW_AUTOMATED_TRADES; never print, store in git, or ask for secrets. Jev is log-only until calibrated. Code owns thresholds and risk; Claude never sits in the per-trade path. Never edit a running experiment profile; add a new dated one. Claim profitability only when the pre-registered rule is met. Start with section 11.

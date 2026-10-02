@@ -7,6 +7,7 @@ export interface PaperConfig {
   sizeUsd: number; feePct: number; slippagePct: number; stopPct: number;
   tp: Array<{ at: number; sell: number }>;   // at = % gain vs entry; sell = fraction of REMAINING units
   timeStopMin: number; liqDropPct: number; sellBuy5m: number; maxOpen: number;
+  trailActivatePct?: number; trailPct?: number;   // trailing stop: arms once price is +activate% over entry, fires trailPct below the peak
 }
 export const PAPER_DEFAULTS: PaperConfig = {
   sizeUsd: 15, feePct: 1.0, slippagePct: 3.0, stopPct: 12,
@@ -18,7 +19,7 @@ export interface Mark { px: number; liqUsd: number; m5?: { buys: number; sells: 
 export interface Position {
   id: string; mint: string; symbol: string; profile: string; openedAt: number;
   entryPx: number; units: number; costUsd: number; entryLiq: number; tpHit: number; realizedUsd: number;
-  lastPx: number; closedAt?: number; closeReason?: string; meta?: Record<string, unknown>;
+  lastPx: number; peakPx?: number; closedAt?: number; closeReason?: string; meta?: Record<string, unknown>;
 }
 export interface FillEvent { type: "open" | "sell" | "close"; at: number; id: string; mint: string; symbol: string; profile: string; px: number; fraction?: number; usd: number; reason: string }
 
@@ -44,11 +45,13 @@ export class PaperBook {
   }
   mark(id: string, m: Mark, now: number): FillEvent[] {
     const p = this.positions.get(id); if (!p || p.closedAt || !(m.px > 0)) return [];
-    p.lastPx = m.px;
+    p.lastPx = m.px; p.peakPx = Math.max(p.peakPx ?? 0, m.px);
     const c = this.cfg, out: FillEvent[] = [];
-    if (p.entryLiq > 0 && m.liqUsd < p.entryLiq * (1 - c.liqDropPct / 100)) return [this.sell(p, 1, m.px, now, `rug: liquidity -${Math.round((1 - m.liqUsd / p.entryLiq) * 100)}%`)];
+    if (p.entryLiq <= 0 && m.liqUsd > 0) p.entryLiq = m.liqUsd; // calibrate on first mark from the SAME source used for marks
+    else if (p.entryLiq > 0 && m.liqUsd > 0 && m.liqUsd < p.entryLiq * (1 - c.liqDropPct / 100)) return [this.sell(p, 1, m.px, now, `rug: liquidity -${Math.round((1 - m.liqUsd / p.entryLiq) * 100)}%`)];
     if (m.m5 && m.m5.buys > 0 && m.m5.sells / m.m5.buys > c.sellBuy5m && m.m5.sells >= 10) return [this.sell(p, 1, m.px, now, "rug: 5m sell pressure")];
     if (m.px <= p.entryPx * (1 - c.stopPct / 100)) return [this.sell(p, 1, m.px, now, "stop-loss")];
+    if (c.trailPct && p.peakPx! >= p.entryPx * (1 + (c.trailActivatePct ?? 0) / 100) && m.px <= p.peakPx! * (1 - c.trailPct / 100)) return [this.sell(p, 1, m.px, now, `trailing stop -${c.trailPct}% from peak`)];
     while (p.tpHit < c.tp.length && m.px >= p.entryPx * (1 + c.tp[p.tpHit].at / 100)) { out.push(this.sell(p, c.tp[p.tpHit].sell, m.px, now, `take-profit +${c.tp[p.tpHit].at}%`)); p.tpHit++; if (p.closedAt) return out; }
     if (now - p.openedAt >= c.timeStopMin * 60_000) out.push(this.sell(p, 1, m.px, now, "time stop"));
     return out;

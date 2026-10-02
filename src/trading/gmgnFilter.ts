@@ -23,14 +23,15 @@ export function gmgnScreen(t: Record<string, any>, nowMs = Date.now(), f = GMGN_
   if (t.is_wash_trading === true) fail.push("wash trading");
   if (n(t.renounced_mint) !== 1) fail.push("mint not renounced");
   if (n(t.renounced_freeze_account) !== 1) fail.push("freeze not renounced");
-  if (n(t.rug_ratio) > f.maxRugRatio) fail.push(`rug_ratio ${n(t.rug_ratio).toFixed(2)}`);
-  if (n(t.bundler_rate) > f.maxBundlerRate) fail.push(`bundlers ${(n(t.bundler_rate) * 100).toFixed(0)}%`);
-  if (n(t.top_10_holder_rate) > f.maxTop10) fail.push(`top10 ${(n(t.top_10_holder_rate) * 100).toFixed(0)}%`);
-  if (n(t.dev_team_hold_rate) > f.maxDevHold) fail.push(`dev holds ${(n(t.dev_team_hold_rate) * 100).toFixed(0)}%`);
+  if (n(t.rug_ratio) > f.maxRugRatio) fail.push("rug_ratio > 0.3");
+  if (n(t.bundler_rate) > f.maxBundlerRate) fail.push("bundlers > 25%");
+  if (n(t.top_10_holder_rate) > f.maxTop10) fail.push("top10 > 30%");
+  if (n(t.dev_team_hold_rate) > f.maxDevHold) fail.push("dev holds > 5%");
   if (n(t.rat_trader_amount_rate) > f.maxRatTrader) fail.push("rat traders");
   if (n(t.top70_sniper_hold_rate) > f.maxSniperTop70) fail.push("snipers hold");
   if (n(t.entrapment_ratio) > f.maxEntrapment) fail.push("entrapment");
   if (n(t.price_change_percent1h) > f.maxChange1hPct) fail.push("late +300% 1h");
+  if (n(t.price_change_percent5m) <= -10) fail.push("5m drawdown >= 10%"); // GMGN's own hard stop: never buy into a falling knife
   const buys = n(t.buys), sells = n(t.sells);
   if (sells === 0 && buys > 20) fail.push("no sells"); else if (sells > 0 && buys / sells > f.maxBuySellRatio) fail.push("lopsided flow");
   return fail;
