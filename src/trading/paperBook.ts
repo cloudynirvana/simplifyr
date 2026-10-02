@@ -56,6 +56,11 @@ export class PaperBook {
     if (now - p.openedAt >= c.timeStopMin * 60_000) out.push(this.sell(p, 1, m.px, now, "time stop"));
     return out;
   }
+  /** Force-close an open position (e.g. the copied wallets sold). */
+  close(id: string, px: number, now: number, reason: string): FillEvent | null {
+    const p = this.positions.get(id); if (!p || p.closedAt || !(px > 0)) return null;
+    p.lastPx = px; return this.sell(p, 1, px, now, reason);
+  }
   summary(profile?: string) {
     const ps = [...this.positions.values()].filter((p) => !profile || p.profile === profile);
     const closed = ps.filter((p) => p.closedAt), open = ps.filter((p) => !p.closedAt);

@@ -8,7 +8,8 @@ description: Evaluate the GMGN research ledger and paper results (veto funnel, p
 2. Read in this order:
    - Screen histogram: which rules reject most tokens.
    - Outcomes at +60m/+240m by stage: rejected groups should do clearly worse than `entered`; if a reject group does better, that rule may be filtering winners (evidence for a pre-registered change, not an immediate edit).
-   - Profiles `base` / `wide` / `trail` (same entries, different exits): expectancy after costs, profit factor, max drawdown, weekly P&L.
+   - Profiles `base` / `wide` / `trail` (same entries, different exits) and `copy` (LEDGER: smart money/KOL copy signals): expectancy after costs, profit factor, max drawdown, weekly P&L.
+   - Copy funnel in the heartbeat `copy` block: wallets scored vs eligible, signals, vetoes ("already pumped vs copied wallets" means we would have been exit liquidity), entries, mirror exits.
    - Jev Brier vs base rate (log-only; Jev may gate entries only after it beats the base rate on ≥ 100 outcomes).
 3. Decisions follow `docs/EXPERIMENTS.md`: never edit a running profile; add a new named, dated profile instead.
 

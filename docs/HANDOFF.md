@@ -33,6 +33,8 @@ GMGN /v1/market/rank (sol, 1h & 5m, 100 tokens, every ~60 s)
   -> GMGN /v1/market/token_top_holders     src/trading/gmgnChecks.ts  holderScreen
   -> Jev (log only)                        src/trading/memeJev.ts
   -> paper entry in 3 exit profiles        src/trading/paperBook.ts  (same entries, different exits)
+SCOUT: GMGN /v1/trenches (near_completion + completed) every ~3 min -> same pipeline
+LEDGER: GMGN /v1/user/smartmoney + /v1/user/kol -> wallet_stats eligibility -> >=2-wallet cluster -> WARDEN (chase, liquidity, security, holders) -> 'copy' profile; mirror exit when copied wallets sell   src/trading/copyTrade.ts
 marks: GMGN /v1/token/info every 20 s      src/trading/gmgnEngine.ts markOpen
 labels: real return at +60 m and +240 m for every checked candidate (+10% sample of screen rejects)
 ```
@@ -60,6 +62,7 @@ labels: real return at +60 m and +240 m for every checked candidate (+10% sample
 | base | −12% | ½ at +25%, then ½ at +60% | none | 2 h |
 | wide | −20% | ½ at +25%, then ½ at +60% | none | 3 h |
 | trail | −15% | none | arms at +20%, exits 15% below the peak | 4 h |
+| copy (LEDGER) | −15% | ½ at +50% | arms at +30%, exits 20% below the peak | 6 h, plus a mirror exit when copied wallets sell |
 
 **Rug triggers in every profile:** a liquidity drop of more than 20% from the first mark, or 5-minute sell volume more than 1.5× buy volume. Costs are 1% fee plus 3% slippage per side.
 
@@ -85,6 +88,7 @@ labels: real return at +60 m and +240 m for every checked candidate (+10% sample
 - The `/v1/market/token_top_holders` fields `addr_type`, `amount_percentage` and `maker_token_tags`, taken from GMGN's own analyzer code and not yet seen live.
 - `/v1/trade/quote`, which needs only the read key but wants a `from_address`. It's not used yet, so paper fills use rank price plus a fixed 4% cost.
 - Real fill costs on thin pools. Paper results are an upper bound.
+- The response shapes of `/v1/user/smartmoney`, `/v1/user/kol`, `/v1/user/wallet_stats` and `/v1/trenches` are taken from GMGN's skill docs and were tested only with mocks. Check the `wallet` and `candidate` rows in the ledger on the server.
 
 ---
 

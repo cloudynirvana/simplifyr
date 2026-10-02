@@ -52,6 +52,11 @@ export class GmgnClient {
   async quote(chain: string, from: string, inputToken: string, outputToken: string, amountRaw: string, slippage: number): Promise<any> {
     return this.req("GET", "/v1/trade/quote", { chain, from_address: from, input_token: inputToken, output_token: outputToken, input_amount: amountRaw, slippage });
   }
+  /** Recent Smart Money / KOL trades: list of { maker, side, base_address, amount_usd, price_usd, timestamp, is_open_or_close, maker_info.tags }. */
+  async smartMoney(chain: string, limit = 200): Promise<any[]> { const d = await this.req("GET", "/v1/user/smartmoney", { chain, limit }); return Array.isArray(d) ? d : d?.list ?? []; }
+  async kol(chain: string, limit = 200): Promise<any[]> { const d = await this.req("GET", "/v1/user/kol", { chain, limit }); return Array.isArray(d) ? d : d?.list ?? []; }
+  /** Wallet stats (realized_profit, buy/sell counts, pnl_stat.{winrate, token_num, avg_holding_period, pnl_lt_nd5_num, ...}). */
+  async walletStats(chain: string, wallet: string, period = "7d"): Promise<any> { const d = await this.req("GET", "/v1/user/wallet_stats", { chain, wallet_address: [wallet], period }); return Array.isArray(d) ? d[0] : d?.list?.[0] ?? d; }
   async tokenSecurity(chain: string, address: string): Promise<any> { return this.req("GET", "/v1/token/security", { chain, address }); }
   async tokenInfo(chain: string, address: string): Promise<any> { return this.req("GET", "/v1/token/info", { chain, address }); }
   async createdTokens(chain: string, wallet: string): Promise<any> { return this.req("GET", "/v1/user/created_tokens", { chain, wallet_address: wallet }); }

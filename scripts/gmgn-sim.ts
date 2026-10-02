@@ -22,15 +22,20 @@ const PROFILES = { // pre-registered 2026-10-02; see docs/EXPERIMENTS.md before 
   wide:  { ...PAPER_DEFAULTS, stopPct: 20, tp: [{ at: 25, sell: 0.5 }, { at: 60, sell: 0.5 }], timeStopMin: 180 },
   trail: { ...PAPER_DEFAULTS, stopPct: 15, tp: [], trailActivatePct: 20, trailPct: 15, timeStopMin: 240 },
 };
-const engine = new GmgnEngine({ g, profiles: PROFILES, log, jev: hasJev ? (s) => askMemeJev(s) : undefined });
-log({ type: "start", at: Date.now(), profiles: PROFILES, jev: hasJev });
-console.log(`gmgn-sim: paper only, profiles ${Object.keys(PROFILES).join("/")}, Jev ${hasJev ? "log-only" : "off"}`);
+const COPY_PROFILES = { // LEDGER copy-trading worker, pre-registered 2026-10-02 (docs/EXPERIMENTS.md)
+  copy: { ...PAPER_DEFAULTS, stopPct: 15, tp: [{ at: 50, sell: 0.5 }], trailActivatePct: 30, trailPct: 20, timeStopMin: 360 },
+};
+const engine = new GmgnEngine({ g, profiles: PROFILES, copyProfiles: COPY_PROFILES, log, jev: hasJev ? (s) => askMemeJev(s) : undefined });
+log({ type: "start", at: Date.now(), profiles: PROFILES, copyProfiles: COPY_PROFILES, jev: hasJev });
+console.log(`gmgn-sim: paper only, profiles ${Object.keys(PROFILES).join("/")} + copy, Jev ${hasJev ? "log-only" : "off"}`);
 
 let tick = 0, busy = false;
 const loop = async () => {
   if (busy) return; busy = true;
   try {
     if (tick % 3 === 0) await engine.discover(tick % 6 === 0 ? "1h" : "5m");   // every ~60 s, alternating windows
+    if (tick % 9 === 4) await engine.discoverTrenches();                       // SCOUT: graduating/graduated launches, every ~3 min
+    if (tick % 3 === 1) await engine.copyScan();                               // LEDGER: smart money / KOL copy signals, every ~60 s
     for (const e of await engine.markOpen()) console.log(`${new Date(e.at).toISOString().slice(11, 19)} ${e.profile.padEnd(5)} ${e.type.toUpperCase().padEnd(5)} ${e.symbol} $${e.usd.toFixed(2)} ${e.reason}`);
     await engine.label();
   } catch (err) { engine.stats.errors++; console.log("loop error:", (err as Error).message); }
