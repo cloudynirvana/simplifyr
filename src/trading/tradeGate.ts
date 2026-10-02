@@ -35,6 +35,9 @@ export const LIVE_LIMITS = {
   jevVetoRugRisk: 0.5,
 };
 
+/** gmgnScreen passes a risk rule when its field is absent; live trading must not. These must be present and numeric. */
+export const REQUIRED_FIELDS = ["liquidity", "market_cap", "holder_count", "creation_timestamp", "rug_ratio", "top_10_holder_rate", "price_change_percent5m", "price_change_percent1h", "buys", "sells"];
+
 export interface Approval { profile: string; approvedBy: string; approvedAt: string; expiresAt: string; lossBudgetUsd: number; maxTradeUsd: number; dailyLossUsd: number }
 export interface AccountState {
   now: number; killSwitch: boolean; approval: Approval | null;
@@ -146,7 +149,11 @@ export function preTradeCheck(a: AccountState, t: TokenData, L = LIVE_LIMITS): G
   if (a.consecutiveLosses >= L.maxConsecLosses && a.lastLossAt && now - a.lastLossAt < L.cooldownMin * 60_000) layers.signal.push("cooling down after losing streak");
 
   // 1-3. token risk
-  if (!t.rank) layers.fields.push("token fields missing"); else layers.fields.push(...gmgnScreen(t.rank, now));
+  if (!t.rank) layers.fields.push("token fields missing");
+  else {
+    layers.fields.push(...gmgnScreen(t.rank, now));
+    for (const k of REQUIRED_FIELDS) if (!Number.isFinite(num(t.rank[k]))) layers.fields.push(`missing ${k}`);
+  }
   layers.security.push(...securityScreen(t.security));
   if (!t.holders) layers.holders.push("holder data missing"); else layers.holders.push(...holderScreen(t.holders).failures);
 
@@ -191,33 +198,63 @@ export function preTradeCheck(a: AccountState, t: TokenData, L = LIVE_LIMITS): G
     ...(verdict === "GO" && ap ? { order: { sizeUsd: size, slippagePct: L.orderSlippagePct, exits: EXIT_PLANS[ap.profile], profile: ap.profile } } : {}) };
 }
 
-/** Map GMGN /v1/token/info to the rank-item field names gmgnScreen reads (best effort; unknown fields stay missing -> fail closed). */
-export function infoToRankFields(info: any): Record<string, any> {
-  const p = info?.price ?? {}, d = info?.dev ?? {}, s = info?.stat ?? {};
-  const pick = (...v: unknown[]) => v.find((x) => x !== undefined && x !== null);
+/** Map GMGN `token info` (+ `token security`) to the rank-item names gmgnScreen reads. Field names per GMGN's gmgn-token skill.
+ *  Windowed change = price.price vs price.price_{window} (start-of-window price). Unknown fields stay missing -> REQUIRED_FIELDS fails closed. */
+export function infoToRankFields(info: any, sec?: any): Record<string, any> {
+  const p = info?.price ?? {}, st = info?.stat ?? {}, px = num(p.price);
+  const chg = (w: string) => { const o = num(p[`price_${w}`]); return px > 0 && o > 0 ? (px / o - 1) * 100 : undefined; };
+  const supply = num(info?.circulating_supply ?? info?.total_supply);
   return {
-    address: info?.address, symbol: info?.symbol,
-    liquidity: pick(info?.liquidity, info?.pool?.liquidity), market_cap: pick(p.market_cap, info?.market_cap),
-    holder_count: pick(info?.holder_count, s.holder_count), creation_timestamp: pick(info?.creation_timestamp, info?.open_timestamp),
-    price_change_percent1m: pick(p.price_change_percent1m, p.change1m), price_change_percent5m: pick(p.price_change_percent5m, p.change5m), price_change_percent1h: pick(p.price_change_percent1h, p.change1h),
-    buys: pick(p.buys_5m, p.buys, info?.buys), sells: pick(p.sells_5m, p.sells, info?.sells),
-    rug_ratio: pick(info?.rug_ratio, s.rug_ratio), bundler_rate: pick(info?.bundler_rate, s.top_bundler_trader_percentage, s.bundler_rate),
-    top_10_holder_rate: pick(info?.top_10_holder_rate, s.top_10_holder_rate), dev_team_hold_rate: pick(info?.dev_team_hold_rate, d.dev_team_hold_rate, s.dev_team_hold_rate),
-    rat_trader_amount_rate: pick(info?.rat_trader_amount_rate, s.top_rat_trader_percentage), top70_sniper_hold_rate: pick(info?.top70_sniper_hold_rate, s.top70_sniper_hold_rate),
-    entrapment_ratio: pick(info?.entrapment_ratio, s.top_entrapment_trader_percentage), is_honeypot: info?.is_honeypot, is_wash_trading: info?.is_wash_trading,
-    renounced_mint: info?.renounced_mint, renounced_freeze_account: info?.renounced_freeze_account,
+    address: info?.address, symbol: info?.symbol, liquidity: info?.liquidity ?? info?.pool?.liquidity,
+    market_cap: px > 0 && supply > 0 ? px * supply : undefined, holder_count: info?.holder_count ?? st.holder_count,
+    creation_timestamp: info?.creation_timestamp ?? info?.open_timestamp,
+    price_change_percent1m: chg("1m"), price_change_percent5m: chg("5m"), price_change_percent1h: chg("1h"),
+    buys: p.buys_1h, sells: p.sells_1h,
+    rug_ratio: sec?.rug_ratio, top_10_holder_rate: st.top_10_holder_rate ?? info?.dev?.top_10_holder_rate,
+    dev_team_hold_rate: st.dev_team_hold_rate, bundler_rate: st.top_bundler_trader_percentage,
+    rat_trader_amount_rate: st.top_rat_trader_percentage, entrapment_ratio: st.top_entrapment_trader_percentage,
+    is_honeypot: sec ? (sec.is_honeypot === "yes" || sec.is_honeypot === true || sec.is_honeypot === 1 ? 1 : 0) : undefined,
+    renounced_mint: sec?.renounced_mint === true || sec?.renounced_mint === 1 ? 1 : 0,
+    renounced_freeze_account: sec?.renounced_freeze_account === true || sec?.renounced_freeze_account === 1 ? 1 : 0,
   };
 }
 
 /**
- * GMGN /v1/trade/quote price impact. The response shape and the unit (percent vs fraction) are NOT verified live yet,
- * so this returns null (=> NO_TRADE "price impact unknown") until IMPACT_UNIT is set after inspecting one real quote.
- * Fail closed on purpose: guessing the unit wrong by 100x is how a live bot buys into an empty pool.
+ * Price impact from a GMGN `order quote` (`/v1/trade/quote`). The quote has no impact field; it returns input_amount,
+ * output_amount and min_output_amount in smallest units. Impact = effective price paid vs the current mark:
+ *   effPx = inputUsd / (output_amount / 10^decimals);  impact% = (effPx / markPx - 1) * 100   (includes pool fee)
+ * Returns null on anything missing, which makes the gate answer NO_TRADE.
  */
-export const IMPACT_UNIT: "percent" | "fraction" | null = null;
-export function parseQuoteImpact(q: any, unit = IMPACT_UNIT): number | null {
-  if (!unit || !q) return null;
-  const raw = num(q.price_impact ?? q.priceImpact ?? q.price_impact_pct ?? q.priceImpactPct ?? q.quote?.price_impact);
-  if (!Number.isFinite(raw)) return null;
-  return unit === "fraction" ? raw * 100 : raw;
+export function quoteImpactPct(q: any, o: { inputUsd: number; markPx: number; outDecimals: number }): number | null {
+  const out = num(q?.output_amount), dec = num(o.outDecimals);
+  if (!(out > 0) || !(o.inputUsd > 0) || !(o.markPx > 0) || !Number.isInteger(dec) || dec < 0 || dec > 18) return null;
+  return ((o.inputUsd / (out / 10 ** dec)) / o.markPx - 1) * 100;
+}
+
+// ---------- GMGN interface: the exact gmgn-cli order an executor places on GO ----------
+export const SOL_MINT = "So11111111111111111111111111111111111111112";   // copied from GMGN's Chain Currencies table
+export const SOL_FEES = { priorityFeeSol: "0.00001", tipFeeSol: "0.00001" }; // required by GMGN with --condition-orders on SOL
+
+/** Pre-registered exit plan -> GMGN condition orders (sell-ratio-type hold_amount: each fires on what is held at trigger time). */
+export function toConditionOrders(e: ExitPlan) {
+  const o: Array<Record<string, string>> = [{ order_type: "loss_stop", side: "sell", price_scale: String(e.stopPct), sell_ratio: "100" }];
+  e.tp.forEach((tp, i) => o.push({ order_type: "profit_stop", side: "sell", price_scale: String(tp.at),
+    sell_ratio: String(i === e.tp.length - 1 && !e.trailPct ? 100 : Math.round(tp.sell * 100)) }));
+  if (e.trailPct) o.push({ order_type: "profit_stop_trace", side: "sell", price_scale: String(e.trailActivatePct ?? 0), drawdown_rate: String(e.trailPct), sell_ratio: "100" });
+  return o;
+}
+
+/** argv for `gmgn-cli swap` (buy) with exits attached. No --yes: GMGN requires a typed confirmation unless the OWNER sets
+ *  GMGN_ALLOW_AUTOMATED_TRADES=1 in their own shell and the executor is allowed to append --yes (Phase B, see handoff). */
+export function gmgnBuyArgs(o: { wallet: string; mint: string; sizeUsd: number; solPx: number; slippagePct: number; exits: ExitPlan }): string[] | null {
+  const lamports = Math.floor((o.sizeUsd / o.solPx) * 1e9);
+  if (!(lamports > 0) || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(o.wallet) || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(o.mint)) return null;
+  return ["swap", "--chain", "sol", "--from", o.wallet, "--input-token", SOL_MINT, "--output-token", o.mint, "--amount", String(lamports),
+    "--slippage", String(Math.round(o.slippagePct)), "--anti-mev", "--priority-fee", SOL_FEES.priorityFeeSol, "--tip-fee", SOL_FEES.tipFeeSol,
+    "--condition-orders", JSON.stringify(toConditionOrders(o.exits)), "--sell-ratio-type", "hold_amount", "--raw"];
+}
+/** Full exit by the executor (time stop, rug trigger, mirror exit): sell 100% of the token back to SOL. */
+export function gmgnSellAllArgs(wallet: string, mint: string, slippagePct = 10): string[] {
+  return ["swap", "--chain", "sol", "--from", wallet, "--input-token", mint, "--output-token", SOL_MINT, "--percent", "100",
+    "--slippage", String(slippagePct), "--anti-mev", "--raw"];
 }

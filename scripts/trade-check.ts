@@ -14,10 +14,10 @@ import { GmgnClient } from "../src/lib/gmgn";
 import { extractMark } from "../src/trading/gmgnChecks";
 import { askMemeJev } from "../src/trading/memeJev";
 import { gmgnFeatures } from "../src/trading/gmgnFilter";
-import { preTradeCheck, liveReadiness, infoToRankFields, parseQuoteImpact, LIVE_LIMITS, type AccountState, type Approval, type TokenData } from "../src/trading/tradeGate";
+import { preTradeCheck, liveReadiness, infoToRankFields, quoteImpactPct, gmgnBuyArgs, SOL_MINT, LIVE_LIMITS, type AccountState, type Approval, type TokenData } from "../src/trading/tradeGate";
 
 const args = process.argv.slice(2), opt = (k: string) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : undefined; };
-const LIVE = ".trading-state/live", SOL = "So11111111111111111111111111111111111111112";
+const LIVE = ".trading-state/live";
 const readJson = <T>(p: string): T | null => { try { return JSON.parse(fs.readFileSync(p, "utf8")) as T; } catch { return null; } };
 const ledgerPath = opt("--ledger") ?? ".trading-state/gmgn-paper/ledger.jsonl";
 const rows = fs.existsSync(ledgerPath) ? fs.readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }) : [];
@@ -38,18 +38,19 @@ const main = async () => {
     g.tokenInfo("sol", mint).catch(() => null), g.tokenSecurity("sol", mint).catch(() => null), g.holders("sol", mint).catch(() => null),
   ]);
   const ranked = [...rank5m, ...rank1h].find((x: any) => x.address === mint);
-  const rank = ranked ?? (info ? { ...infoToRankFields(info), ...(security ? { renounced_mint: security.renounced_mint, renounced_freeze_account: security.renounced_freeze_account, is_honeypot: security.is_honeypot ?? security.honeypot } : {}) } : null);
+  const rank = ranked ?? (info ? infoToRankFields(info, security) : null);
   const m = info ? extractMark(info) : null;
   const mark = m ? { px: m.px, liqUsd: m.liqUsd || Number(rank?.liquidity) || 0 } : null;
 
-  let quote: TokenData["quote"] = null, quoteRaw: unknown = null;
+  // Same route as `gmgn-cli order quote` (API key only). Quote at the largest size we could send, so impact is conservative.
+  let quote: TokenData["quote"] = null, quoteRaw: unknown = null, solPx: number | undefined;
   const from = opt("--from");
   if (from) {
-    const solInfo = await g.tokenInfo("sol", SOL).catch(() => null), solPx = solInfo ? extractMark(solInfo)?.px : undefined;
+    const solInfo = await g.tokenInfo("sol", SOL_MINT).catch(() => null); solPx = solInfo ? extractMark(solInfo)?.px : undefined;
     const usd = Math.min(LIVE_LIMITS.maxTradeUsd, approval?.maxTradeUsd ?? LIVE_LIMITS.maxTradeUsd);
-    if (solPx) {
-      quoteRaw = await g.quote("sol", from, SOL, mint, String(Math.round((usd / solPx) * 1e9)), LIVE_LIMITS.orderSlippagePct).catch((e) => ({ error: (e as Error).message }));
-      quote = { priceImpactPct: parseQuoteImpact(quoteRaw) };
+    if (solPx && mark) {
+      quoteRaw = await g.quote("sol", from, SOL_MINT, mint, String(Math.floor((usd / solPx) * 1e9)), LIVE_LIMITS.orderSlippagePct).catch((e) => ({ error: (e as Error).message }));
+      quote = { priceImpactPct: quoteImpactPct(quoteRaw, { inputUsd: usd, markPx: mark.px, outDecimals: Number(info?.decimals) }), feePct: 1 }; // pool fee is inside the effective price; 1% covers GMGN/priority fees (conservative)
     }
   }
   const jev = rank ? await askMemeJev({ ...gmgnFeatures(rank) }).catch(() => null) : null;
@@ -61,7 +62,9 @@ const main = async () => {
   };
   const token: TokenData = { mint, fetchedAt: Date.now(), rank, security, holders, mark, quote, jev: jev ? { rugRisk: jev.rugRisk, pUp: jev.pUp, setup: jev.setup } : null };
   const res = preTradeCheck(account, token);
-  console.log(JSON.stringify({ ...res, source: ranked ? "rank" : "token/info", quoteRaw: from ? quoteRaw : "skipped (no --from)" }, null, 2));
+  const gmgnCli = res.verdict === "GO" && res.order && from && solPx ? gmgnBuyArgs({ wallet: from, mint, sizeUsd: res.order.sizeUsd, solPx, slippagePct: res.order.slippagePct, exits: res.order.exits }) : null;
+  console.log(JSON.stringify({ ...res, source: ranked ? "rank" : "token/info", quoteRaw: from ? quoteRaw : "skipped (no --from)",
+    gmgnCli: gmgnCli ? ["gmgn-cli", ...gmgnCli] : null }, null, 2));
   process.exit(res.verdict === "GO" ? 0 : res.verdict === "HALT" ? 2 : 1);
 };
 main().catch((e) => { console.error("trade-check error:", (e as Error).message); process.exit(3); });

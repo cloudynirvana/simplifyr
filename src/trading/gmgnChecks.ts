@@ -8,7 +8,7 @@ import { bundledWallets } from "./pumpFilters";
 export const HOLDER_FILTERS = { maxTop1: 0.05, maxTop10: 0.30, maxInsiderShare: 0.10, maxCreator: 0.05, clusterWallets: 6, clusterTol: 0.05, clusterMinShare: 0.005 };
 
 const frac = (v: unknown) => { const x = Number(v); return !Number.isFinite(x) ? 0 : x > 1.0001 ? x / 100 : x; }; // accepts fraction or percent
-const truthy = (v: unknown) => v === true || v === 1 || v === "1";
+const truthy = (v: unknown) => v === true || v === 1 || v === "1" || v === "yes" || v === "true"; // GMGN token security uses "yes" for is_honeypot
 
 export function securityScreen(sec: Record<string, any> | null | undefined): string[] {
   if (!sec) return ["security data missing"];
