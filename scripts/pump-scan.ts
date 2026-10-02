@@ -1,58 +1,42 @@
 /**
- * Pump.fun PAPER scanner. Watches new launches, tracks each from creation, and every 30s logs tokens that
- * pass ALL hard filters to .trading-state/pump-candidates.jsonl. Places no orders; holds no keys.
- *   npx tsx scripts/pump-scan.ts [solUsd=150]
- * Jev scoring and paper entries plug in next (src/trading/jevPolicy.ts). Needs network access to pumpportal.fun.
+ * Pump.fun PAPER scanner (no orders, no wallet, no paid key).
+ *   Free PumpPortal new-token stream -> wait for 30m/1h/2h/4h/8h checkpoints -> DexScreener market screen -> RugCheck gate
+ *   -> candidates appended to .trading-state/pump-candidates.jsonl (every token that passed the market screen is logged,
+ *   with its RugCheck verdict, so veto reasons can be reviewed).
+ *   npx tsx scripts/pump-scan.ts
+ * Env: SCAN_CHECKPOINTS="30,60,120,240,480" (minutes; override only for testing).
  */
 import fs from "fs";
 import { PumpPortalFeed } from "../src/lib/pumpportal";
-import { PumpTracker } from "../src/trading/pumpTracker";
-import { evaluateToken } from "../src/trading/pumpFilters";
+import { Discovery, CHECKPOINTS_MIN } from "../src/trading/discovery";
+import { makeScanner } from "../src/trading/discoveryScan";
 import { makeRugCheckGate } from "../src/trading/rugcheckGate";
 
-let solUsd = Number(process.argv[2] ?? 150); // fallback; refreshed live below
 fs.mkdirSync(".trading-state", { recursive: true });
 const out = ".trading-state/pump-candidates.jsonl";
-const tracker = new PumpTracker(300);
-const seen = new Set<string>();
-const rugGate = makeRugCheckGate();
-let lastEventAt = 0, candidatesTotal = 0, tradeFeed: "ok" | "denied" | "unknown" = process.env.PUMPPORTAL_API_KEY ? "unknown" : "denied";
-const feed: PumpPortalFeed = new PumpPortalFeed((e) => {
-  if (e.message) { if (/only available/i.test(e.message) && tradeFeed !== "denied") { tradeFeed = "denied"; console.log("WARNING: PumpPortal denied the trade stream (needs a funded API key). Holder/flow filters have no data; no candidates will be logged."); } return; }
+const checkpoints = process.env.SCAN_CHECKPOINTS ? process.env.SCAN_CHECKPOINTS.split(",").map(Number) : CHECKPOINTS_MIN;
+const disc = new Discovery(20000, checkpoints);
+let lastEventAt = 0, created = 0;
+
+const feed = new PumpPortalFeed((e) => {
+  if (e.message) return; // acks / notices
   lastEventAt = Date.now();
-  if (e.txType === "buy" || e.txType === "sell") tradeFeed = "ok";
-  const r = tracker.handle(e);
-  if (r.created) feed.trackTrades(r.created);
-  for (const m of r.evicted ?? []) feed.untrackTrades(m);
-}, { log: (m) => console.log(m), url: process.env.PUMPPORTAL_API_KEY ? `wss://pumpportal.fun/api/data?api-key=${process.env.PUMPPORTAL_API_KEY}` : undefined });
-if (!process.env.PUMPPORTAL_API_KEY) console.log("No PUMPPORTAL_API_KEY: only new-token events are available; the trade stream needs a key funded with >= 0.02 SOL.");
+  if (e.txType === "create" && e.mint) { created++; disc.add(e.mint, e.name ?? "", e.symbol ?? ""); }
+}, { log: (m) => console.log(m) });
+
+const scanner = makeScanner(disc, {
+  gate: makeRugCheckGate(),
+  onCandidate: (c) => {
+    fs.appendFileSync(out, JSON.stringify(c) + "\n");
+    console.log(`${c.rugcheck.pass ? "CANDIDATE" : "vetoed  "} ${c.symbol} ${c.mint} @${c.checkpointMin}m liq $${Math.round(c.market.liquidityUsd ?? 0)}${c.rugcheck.pass ? "" : " — " + c.rugcheck.failures.join(" | ")}`);
+  },
+});
 
 feed.start();
+let busy = false;
 setInterval(async () => {
-  let passed = 0;
-  for (const mint of tracker.tokens.keys()) {
-    const t = tracker.toPumpToken(mint, solUsd);
-    if (!t || t.ageMinutes < 15 || tradeFeed === "denied") continue; // without trades every filter would be fed empty data
-    const r = evaluateToken(t);
-    if (r.pass && !seen.has(mint)) {
-      seen.add(mint); // evaluate each token once; RugCheck is the LAST gate and fails closed
-      const rc = await rugGate(mint);
-      fs.appendFileSync(out, JSON.stringify({ at: Date.now(), token: t, warnings: r.warnings, rugcheck: rc }) + "\n");
-      if (rc.pass) { passed++; candidatesTotal++; }
-    }
-  }
-  // Heartbeat for the external watchdog: it alerts if this file goes stale or the feed stops delivering events.
-  fs.writeFileSync(".trading-state/heartbeat.json", JSON.stringify({ at: Date.now(), lastEventAt, tracked: tracker.tokens.size, candidatesTotal, solUsd, tradeFeed }));
-  console.log(`${new Date().toISOString()} tracking ${tracker.tokens.size}, new candidates ${passed}, sol $${solUsd.toFixed(0)}`);
+  if (!busy) { busy = true; try { await scanner.tick(); } catch (e) { console.log("tick error:", (e as Error).message); } busy = false; }
+  // Heartbeat for the external watchdog: it alerts if this goes stale or the discovery stream stops delivering events.
+  fs.writeFileSync(".trading-state/heartbeat.json", JSON.stringify({ at: Date.now(), lastEventAt, tracked: disc.size, createdTotal: created, tradeFeed: "not-used", ...scanner.stats }));
 }, 30_000);
-
-// Keep SOL/USD fresh (DexScreener, best-liquidity SOL pair). Keeps the last value on any failure.
-async function refreshSol() {
-  try {
-    const r = await fetch("https://api.dexscreener.com/token-pairs/v1/solana/So11111111111111111111111111111111111111112");
-    const pairs = (await r.json()) as Array<{ priceUsd?: string; quoteToken?: { symbol?: string }; liquidity?: { usd?: number } }>;
-    const best = pairs.filter((p) => p.quoteToken?.symbol === "USDC" && Number(p.priceUsd) > 0).sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
-    if (best) solUsd = Number(best.priceUsd);
-  } catch { /* keep previous */ }
-}
-refreshSol(); setInterval(refreshSol, 5 * 60_000);
+setInterval(() => console.log(`${new Date().toISOString()} created ${created} pending ${disc.size} checked ${scanner.stats.checked} noPair ${scanner.stats.noPair} passedMarket ${scanner.stats.passedMarket} candidates ${scanner.stats.candidates} errs ${scanner.stats.errors} fails ${JSON.stringify(scanner.stats.fails)}`), 5 * 60_000);
