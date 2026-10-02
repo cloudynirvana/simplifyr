@@ -175,6 +175,7 @@ Done already: hardened Ubuntu 24.04 (key-only SSH, root login off, firewall allo
 - `src/trading/gmgnEngine.ts`: discover, mark and label.
 - `src/trading/paperBook.ts`: positions, exits and the trailing stop.
 - `src/trading/memeJev.ts`: Jev questions, log-only.
+- `src/trading/tradeGate.ts`, `scripts/trade-check.ts`: live pre-trade checker (GO / NO_TRADE / HALT). Contract for the live executor: `docs/LIVE-TRADER-HANDOFF.md`.
 - `scripts/gmgn-sim.ts`: the service entrypoint.
 - `scripts/gmgn-research.ts`: the research report.
 - `docs/EXPERIMENTS.md`: pre-registration.
