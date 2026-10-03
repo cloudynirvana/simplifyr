@@ -6,9 +6,10 @@ Idea (from @laoyingkhq): memecoins are lost by noticing a pump late. Watch *peop
 
 | Role | Piece | Status |
 |---|---|---|
-| Eyes | GMGN skills (`trading/skills/*`, CLI `gmgn-cli`) + `research.mjs` (smart-money/KOL cluster + security vet) | working, read-only |
-| Brain | Claude using skills: `gmgn-wallet-score`, `gmgn-token-buy`, `gmgn-contract-dd`, `gmgn-holder-analysis`; flows in `trading/docs/` | working |
-| Hands | `hands.mjs`: paper by default, size cap, log; "jev" executor stub | live NOT wired |
+| Eyes | GMGN (`gmgn-cli`, skills in `trading/skills/`): smart-money/KOL flows, token + wallet data | working, read-only |
+| Filter | `filter.mjs` hard gates (safety, dev rug/nuke, holder quality, liquidity/age) + wallet vetting (`wallets.mjs`) | working |
+| Brain | TypeSafe **Jev** (`jev.mjs`): typed rug probability + enter/wait/skip verdict per candidate | working, shadow mode |
+| Hands | Paper fills from real Jupiter quotes (`paper.mjs`); live hard-disabled in `hands.mjs` | paper only |
 
 Run: `node trading/research.mjs sol` (env `MIN_CLUSTER`, `WINDOW_S`), `node trading/hands.mjs buy <mint> <usd>`.
 Keys live in gitignored `.env.local` (`GMGN_API_KEY`). Live needs `LIVE_TRADING=1`, `--confirm`, `MAX_ORDER_USD` cap.

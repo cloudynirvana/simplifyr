@@ -10,6 +10,7 @@ import { execute } from './hands.mjs';
 import { notify } from './telegram.mjs';
 import { loadWallets } from './wallets.mjs';
 import { computeStats } from './stats.mjs';
+import { jevAssess, jevState, jevVeto } from './jev.mjs';
 
 const CHAIN = process.env.CHAIN ?? 'sol', POLL_MS = Number(process.env.POLL_S ?? 60) * 1000;
 const SIZE = Number(process.env.ORDER_USD ?? 10);
@@ -49,9 +50,11 @@ async function scan() {
       }
       continue;
     }
-    st.watch[tok] = { sym: c.sym, peak: px(i), ts: now };
-    journal({ event: 'signal', token: tok, sym: c.sym, wallets: c.w.size, px: px(i), snap: snap(s, i) });
-    await notify(`WATCH ${c.sym} ${tok} wallets=${c.w.size} px=${px(i)}`);
+    const jev = await jevAssess(jevState(s, i));
+    journal({ event: 'signal', token: tok, sym: c.sym, wallets: c.w.size, px: px(i), snap: snap(s, i), jev });
+    if (jevVeto(jev)) { st.rejected[tok] = { sym: c.sym, fail: ['jev_veto'], ts: now, px0: px(i), done: [] }; continue; }
+    st.watch[tok] = { sym: c.sym, peak: px(i), ts: now, jev };
+    await notify(`WATCH ${c.sym} ${tok} wallets=${c.w.size} px=${px(i)}${jev && !jev.error ? ` | Jev: ${jev.action} (${(jev.conf * 100).toFixed(0)}%), rug ${(jev.rug * 100).toFixed(0)}%` : ''}`);
   }
 }
 
@@ -72,10 +75,13 @@ async function mirrorScan() {
       const i = info(tok), s = sec(tok), fail = gates(s, i, now, { ...CFG, ...MIRROR_CFG });
       if (fail.length) { st.rejected[tok] = { sym: a.token.symbol, fail, ts: now, px0: px(i), done: [] };
         journal({ event: 'reject', strategy: 'mirror', token: tok, sym: a.token.symbol, fail, px0: px(i), snap: snap(s, i) }); continue; }
+      const jev = await jevAssess(jevState(s, i));
+      if (jevVeto(jev)) { st.rejected[tok] = { sym: a.token.symbol, fail: ['jev_veto'], ts: now, px0: px(i), done: [] };
+        journal({ event: 'reject', strategy: 'mirror', token: tok, sym: a.token.symbol, fail: ['jev_veto'], px0: px(i), jev }); continue; }
       const r = await execute({ side: 'buy', token: tok, usd: SIZE, px: px(i) });
       if (!r.ok) { await notify(`MIRROR BUY MISSED ${a.token.symbol} (${r.reason})`); continue; }
       st.pos[tok] = { sym: a.token.symbol, entryPx: r.fillPx, peak: r.fillPx, lastPx: r.fillPx, units: r.units, cost: SIZE, proceeds: 0,
-                      costs: r.costUsd, openedTs: now, strategy: 'mirror', src: w, creator: Number(i.dev?.creator_token_balance), tp1: false, tp2: false, mode: r.mode };
+                      costs: r.costUsd, openedTs: now, strategy: 'mirror', src: w, creator: Number(i.dev?.creator_token_balance), tp1: false, tp2: false, mode: r.mode, jev };
       const lag = (r.fillPx / Number(a.price_usd) - 1) * 100;
       journal({ event: 'mirror_entry', wallet: w, token: tok, walletPx: Number(a.price_usd), fillPx: r.fillPx, copyLagPct: lag, delayS: now - a.timestamp });
       await notify(`MIRROR BUY[${r.mode}] ${a.token.symbol} copying ${w.slice(0, 6)}… fill ${r.fillPx.toPrecision(4)} (${lag.toFixed(1)}% worse than wallet)`);
@@ -91,7 +97,7 @@ async function dailySummary() {
 
 async function closeTrip(tok, q, reason) {
   const pnlUsd = q.proceeds - q.cost;
-  journal({ event: 'close', token: tok, sym: q.sym, strategy: q.strategy ?? 'cluster', src: q.src, reason, pnlUsd, pnlPct: pnlUsd / q.cost * 100, costsUsd: q.costs,
+  journal({ event: 'close', token: tok, sym: q.sym, strategy: q.strategy ?? 'cluster', src: q.src, jev: q.jev, reason, pnlUsd, pnlPct: pnlUsd / q.cost * 100, costsUsd: q.costs,
             holdS: Math.floor(Date.now() / 1000) - q.openedTs, mode: q.mode });
   st.day[today()] = (st.day[today()] ?? 0) + pnlUsd;
   delete st.pos[tok];
@@ -121,7 +127,7 @@ async function manage() {
       const r = await execute({ side: 'buy', token: tok, usd: SIZE, px: p });
       if (!r.ok) { await notify(`BUY MISSED ${w.sym} (${r.reason})`); continue; }
       st.pos[tok] = { sym: w.sym, entryPx: r.fillPx, peak: r.fillPx, lastPx: r.fillPx, units: r.units, cost: SIZE, proceeds: 0,
-                      costs: r.costUsd, openedTs: now, strategy: 'cluster', creator: Number(i.dev?.creator_token_balance), tp1: false, tp2: false, mode: r.mode };
+                      costs: r.costUsd, openedTs: now, strategy: 'cluster', creator: Number(i.dev?.creator_token_balance), tp1: false, tp2: false, mode: r.mode, jev: w.jev };
       delete st.watch[tok];
       await notify(`BUY[${r.mode}] ${w.sym} $${SIZE} fill ${r.fillPx.toPrecision(4)} slip ${r.slipPct.toFixed(1)}% (signal px ${p})`);
     }

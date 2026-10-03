@@ -78,3 +78,9 @@ In the first discovery run, 1 of 20 wallets passed. Re-run `discover` weekly; wa
 1. In Telegram, message @BotFather, send `/newbot`, copy the token.
 2. Put `TELEGRAM_BOT_TOKEN=...` in `.env.local` on the VPS, send your new bot any message, then run `node trading/telegram.mjs chatid` and add the printed `TELEGRAM_CHAT_ID=...` too.
 3. `node trading/telegram.mjs` sends a test message. The bot also sends a daily summary.
+
+## Jev (TypeSafe) as the brain, shadow mode first
+Jev is a decision model, not an execution API: it returns probabilities (rug within 24h, enter/wait/skip), never trades.
+Every candidate that passes the hard gates is scored and the verdict is stored on the position. `stats.mjs` -> `byJev`
+groups closed trades by Jev's verdict. Only if trades Jev said `skip` (or `+rugHigh`) clearly lose more than the rest, over
+a meaningful sample, switch to `JEV_MODE=veto` (and that starts a new evaluation version). Cost is ~550 tokens/call, about $0.00002.

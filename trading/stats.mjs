@@ -18,9 +18,13 @@ export function computeStats(j = readJournal()) {
     return { n: a.length, pumped2x: a.filter(r => r.x >= 2).length, dumped50: a.filter(r => r.x <= 0.5).length }; };
   const by = {};
   for (const t of trips) { const k = t.strategy ?? 'cluster', r = (by[k] ??= { n: 0, wins: 0, pnl: 0 }); r.n++; r.pnl += t.pnlUsd; if (t.pnlUsd > 0) r.wins++; }
+  // Would following Jev have helped? Group closed trades by Jev's verdict at entry (shadow mode = no influence on trades).
+  const byJev = {};
+  for (const t of trips) { if (!t.jev || t.jev.error) continue;
+    const k = `${t.jev.action}${t.jev.rug >= 0.5 ? '+rugHigh' : ''}`, r = (byJev[k] ??= { n: 0, wins: 0, pnl: 0 }); r.n++; r.pnl += t.pnlUsd; if (t.pnlUsd > 0) r.wins++; }
   const lag = j.filter(r => r.event === 'mirror_entry').map(r => r.copyLagPct);
   return {
-    byStrategy: by, mirrorCopyLagPctAvg: avg(lag), mirrorStale: j.filter(r => r.event === 'mirror_stale').length,
+    byStrategy: by, byJev, mirrorCopyLagPctAvg: avg(lag), mirrorStale: j.filter(r => r.event === 'mirror_stale').length,
     trades: trips.length, winRate: trips.length ? wins.length / trips.length : 0,
     avgWinUsd: avg(wins.map(t => t.pnlUsd)), avgLossUsd: avg(losses.map(t => t.pnlUsd)),
     expectancyUsd: avg(trips.map(t => t.pnlUsd)), profitFactor: gl ? gw / gl : null,
