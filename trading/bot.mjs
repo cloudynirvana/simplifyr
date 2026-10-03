@@ -12,7 +12,7 @@ import { loadWallets } from './wallets.mjs';
 import { computeStats } from './stats.mjs';
 
 const CHAIN = process.env.CHAIN ?? 'sol', POLL_MS = Number(process.env.POLL_S ?? 60) * 1000;
-const SIZE = Number(process.env.ORDER_USD ?? 10), LIVE = process.env.LIVE_TRADING === '1';
+const SIZE = Number(process.env.ORDER_USD ?? 10);
 const MAX_OPEN = Number(process.env.MAX_OPEN ?? 5), DAILY_STOP = Number(process.env.DAILY_LOSS_USD ?? 30);
 const SOFT = ['too_new', 'too_few_smart_wallets'];
 const MIRROR_CFG = { minAgeS: 300, minSmartWallets: 0 }, MIRROR_MAX_LAG_S = Number(process.env.MIRROR_MAX_LAG_S ?? 120);
@@ -72,7 +72,7 @@ async function mirrorScan() {
       const i = info(tok), s = sec(tok), fail = gates(s, i, now, { ...CFG, ...MIRROR_CFG });
       if (fail.length) { st.rejected[tok] = { sym: a.token.symbol, fail, ts: now, px0: px(i), done: [] };
         journal({ event: 'reject', strategy: 'mirror', token: tok, sym: a.token.symbol, fail, px0: px(i), snap: snap(s, i) }); continue; }
-      const r = await execute({ side: 'buy', token: tok, usd: SIZE, px: px(i) }, { live: LIVE });
+      const r = await execute({ side: 'buy', token: tok, usd: SIZE, px: px(i) });
       if (!r.ok) { await notify(`MIRROR BUY MISSED ${a.token.symbol} (${r.reason})`); continue; }
       st.pos[tok] = { sym: a.token.symbol, entryPx: r.fillPx, peak: r.fillPx, lastPx: r.fillPx, units: r.units, cost: SIZE, proceeds: 0,
                       costs: r.costUsd, openedTs: now, strategy: 'mirror', src: w, creator: Number(i.dev?.creator_token_balance), tp1: false, tp2: false, mode: r.mode };
@@ -99,7 +99,7 @@ async function closeTrip(tok, q, reason) {
 }
 
 async function sell(tok, q, frac, why) {
-  const r = await execute({ side: 'sell', token: tok, units: q.units * frac, px: q.lastPx }, { live: LIVE });
+  const r = await execute({ side: 'sell', token: tok, units: q.units * frac, px: q.lastPx });
   if (!r.ok) { await notify(`SELL FAILED ${q.sym} ${why} (${r.reason}) — will retry next cycle`); return false; }
   q.units -= r.units; q.proceeds += r.usd; q.costs += r.costUsd;
   await notify(`SELL[${r.mode}] ${q.sym} ${why} fill ${r.fillPx.toPrecision(4)} slip ${r.slipPct.toFixed(1)}%`);
@@ -118,7 +118,7 @@ async function manage() {
       st.rejected[tok] = { sym: w.sym, fail: ['regate'], ts: now, px0: p, done: [] }; delete st.watch[tok]; continue; }
     if (p <= w.peak * 0.85) {
       if (haltedToday || Object.keys(st.pos).length >= MAX_OPEN) continue;   // risk limits: skip, keep watching
-      const r = await execute({ side: 'buy', token: tok, usd: SIZE, px: p }, { live: LIVE });
+      const r = await execute({ side: 'buy', token: tok, usd: SIZE, px: p });
       if (!r.ok) { await notify(`BUY MISSED ${w.sym} (${r.reason})`); continue; }
       st.pos[tok] = { sym: w.sym, entryPx: r.fillPx, peak: r.fillPx, lastPx: r.fillPx, units: r.units, cost: SIZE, proceeds: 0,
                       costs: r.costUsd, openedTs: now, strategy: 'cluster', creator: Number(i.dev?.creator_token_balance), tp1: false, tp2: false, mode: r.mode };

@@ -3,7 +3,15 @@
 Goal: find out, with fake money, whether this filter has an edge *after* real-world friction, before any live key exists.
 Paper trading is always optimistic. Everything below exists to shrink that gap, and to judge results with a haircut.
 
-## What the paper engine simulates (`paper.mjs`, all env-tunable, pessimistic by default)
+## What the paper engine simulates (`paper.mjs`)
+Fills are priced from a **real executable Jupiter quote for your exact size**, fetched after the simulated latency (`src: "jupiter"` in the journal).
+It includes the AMM fee and price impact. If no route exists (pool pulled, can't sell), the fill fails, as it would live.
+On top: platform fee, tip, and random tx failures. (GMGN's own `order quote` needs a wallet private key, so it is not used.)
+
+**Reality check:** a $10 buy followed by an immediate sell on a live token returned $8.53, about 15% friction before any price move.
+At small sizes the fixed tip dominates. Paper-trade at the size you'd really use live, and set `TIP_USD` to your real priority fee.
+
+Older model-based settings (fallback with `QUOTE_SOURCE=model`):
 | Friction | Default | Env |
 |---|---|---|
 | Latency: price is re-fetched after your "tx lands" | 8 s | `LATENCY_S` |
@@ -41,14 +49,15 @@ price moving between your polls (stops are checked every `POLL_S`=60 s; a dump i
 - `rejectedFollowup`: for tokens the filter *rejected*: `dumped50` high = the filter is saving you from rugs (good). `pumped2x` high = it is too strict and leaving money behind. Needs 50+ samples per bucket to mean anything.
 
 ## Pass criteria for a live pilot (all must hold)
-- >= 50 closed trades over >= 3 weeks, spanning both quiet and busy market days.
+- >= 100 closed trades (50 is the absolute floor) over >= 3 weeks, spanning quiet and busy days. The filter is strict, so this may take longer: extend the run, don't loosen gates to hit the count.
+- Fills from real quotes (`src: jupiter`), not the model fallback.
 - `expectancyUsd` > 0 AND `pnlIfCostsDoubledUsd` > 0 AND `profitFactor` >= 1.5.
 - Profit not dominated by one trade (remove the best trade; expectancy should still be >= 0).
 - `maxDrawdownUsd` is less than 30% of the money you'd put in.
 - No unexplained bugs, journal matches Telegram, restarts are clean.
 If it fails: that is a successful test. It just saved you real money. Adjust one gate and re-run.
 
-## Live pilot (later, needs your live key + the "jev" executor wired)
+## Live pilot (separate decision, after a code change + review: live is hard-disabled today)
 Start with the smallest size (e.g. $5), the same filter, `MAX_OPEN=2`, a daily loss cap you can truly afford. Run paper and live
 side by side for a week and compare fills; recalibrate `paper.mjs` to the real slippage/latency/fail rate. Only then scale up.
 
