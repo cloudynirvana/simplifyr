@@ -1,18 +1,24 @@
 #!/usr/bin/env node
 // 24/7 loop: SCAN smart-money/KOL buys -> cluster (>=3 wallets/1h) -> gates -> WATCHLIST ->
 // enter on >=15% pullback -> manage: -35% stop, 1/3 @2x, 1/3 @4x, 25% trail on rest, exit on dev sell.
+// Every decision and fill is journaled (journal.jsonl); rejected tokens are followed up at +1h/+4h so we can
+// measure whether the filter is catching rugs (good) or missing winners (too strict).
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { gmgn } from './lib.mjs';
+import { gmgn, journal } from './lib.mjs';
 import { gates } from './filter.mjs';
 import { execute } from './hands.mjs';
 
 const CHAIN = process.env.CHAIN ?? 'sol', POLL_MS = Number(process.env.POLL_S ?? 60) * 1000;
 const SIZE = Number(process.env.ORDER_USD ?? 10), LIVE = process.env.LIVE_TRADING === '1';
+const MAX_OPEN = Number(process.env.MAX_OPEN ?? 5), DAILY_STOP = Number(process.env.DAILY_LOSS_USD ?? 30);
+const SOFT = ['too_new', 'too_few_smart_wallets'];
 const STATE = new URL('./state.json', import.meta.url).pathname;
 const IGNORE = new Set(['So11111111111111111111111111111111111111112',
   'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
-const st = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : { watch: {}, pos: {}, rejected: {} };
+const st = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : { watch: {}, pos: {}, rejected: {}, day: {} };
+st.day ??= {};
 const save = () => writeFileSync(STATE, JSON.stringify(st, null, 1));
+const today = () => new Date().toISOString().slice(0, 10);
 
 async function notify(msg) {
   console.log(new Date().toISOString(), msg);
@@ -21,6 +27,10 @@ async function notify(msg) {
     headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: c, text: msg }) }).catch(() => {});
 }
 const px = i => Number(i.price?.price);
+const info = tok => gmgn(['token', 'info', '--chain', CHAIN, '--address', tok]);
+const sec = tok => gmgn(['token', 'security', '--chain', CHAIN, '--address', tok]);
+const snap = (s, i) => ({ top10: +s.top_10_holder_rate, creatorHold: +i.stat?.creator_hold_rate, bundler: +i.stat?.top_bundler_trader_percentage,
+  fresh: +i.stat?.fresh_wallet_rate, smart: i.wallet_tags_stat?.smart_wallets, liq: +i.liquidity, holders: i.holder_count });
 
 async function scan() {
   const now = Math.floor(Date.now() / 1000), by = new Map();
@@ -33,52 +43,73 @@ async function scan() {
   }
   for (const [tok, c] of by) {
     if (c.w.size < 3 || st.watch[tok] || st.pos[tok] || st.rejected[tok]) continue;
-    const info = gmgn(['token', 'info', '--chain', CHAIN, '--address', tok]);
-    const sec = gmgn(['token', 'security', '--chain', CHAIN, '--address', tok]);
-    const fail = gates(sec, info);
+    const i = info(tok), s = sec(tok), fail = gates(s, i);
     if (fail.length) {
-      // retry-able reasons (age/smart wallets) are re-checked later; hard fails are final
-      const soft = fail.every(r => ['too_new', 'too_few_smart_wallets'].includes(r));
-      if (!soft) st.rejected[tok] = { sym: c.sym, fail, ts: now };
+      if (!fail.every(r => SOFT.includes(r))) {          // hard fail: final, but follow its price for calibration
+        st.rejected[tok] = { sym: c.sym, fail, ts: now, px0: px(i), done: [] };
+        journal({ event: 'reject', token: tok, sym: c.sym, fail, px0: px(i), snap: snap(s, i) });
+      }
       continue;
     }
-    st.watch[tok] = { sym: c.sym, peak: px(info), ts: now, creator: info.dev?.creator_token_balance };
-    await notify(`WATCH ${c.sym} ${tok} wallets=${c.w.size} px=${px(info)}`);
+    st.watch[tok] = { sym: c.sym, peak: px(i), ts: now };
+    journal({ event: 'signal', token: tok, sym: c.sym, wallets: c.w.size, px: px(i), snap: snap(s, i) });
+    await notify(`WATCH ${c.sym} ${tok} wallets=${c.w.size} px=${px(i)}`);
   }
+}
+
+async function closeTrip(tok, q, reason) {
+  const pnlUsd = q.proceeds - q.cost;
+  journal({ event: 'close', token: tok, sym: q.sym, reason, pnlUsd, pnlPct: pnlUsd / q.cost * 100, costsUsd: q.costs,
+            holdS: Math.floor(Date.now() / 1000) - q.openedTs, mode: q.mode });
+  st.day[today()] = (st.day[today()] ?? 0) + pnlUsd;
+  delete st.pos[tok];
+  await notify(`CLOSED ${q.sym} ${reason} pnl ${pnlUsd.toFixed(2)} (${(pnlUsd / q.cost * 100).toFixed(0)}%)`);
+}
+
+async function sell(tok, q, frac, why) {
+  const r = await execute({ side: 'sell', token: tok, units: q.units * frac, px: q.lastPx }, { live: LIVE });
+  if (!r.ok) { await notify(`SELL FAILED ${q.sym} ${why} (${r.reason}) — will retry next cycle`); return false; }
+  q.units -= r.units; q.proceeds += r.usd; q.costs += r.costUsd;
+  await notify(`SELL[${r.mode}] ${q.sym} ${why} fill ${r.fillPx.toPrecision(4)} slip ${r.slipPct.toFixed(1)}%`);
+  if (frac >= 1 || q.units < 1e-9) await closeTrip(tok, q, why);
+  return true;
 }
 
 async function manage() {
   const now = Math.floor(Date.now() / 1000);
+  const haltedToday = (st.day[today()] ?? 0) <= -DAILY_STOP;
   for (const [tok, w] of Object.entries(st.watch)) {
-    const info = gmgn(['token', 'info', '--chain', CHAIN, '--address', tok]), p = px(info);
     if (now - w.ts > 7200) { delete st.watch[tok]; continue; }
+    const i = info(tok), p = px(i);
     w.peak = Math.max(w.peak, p);
-    const sec = gmgn(['token', 'security', '--chain', CHAIN, '--address', tok]);
-    if (gates(sec, info).some(r => !['too_new', 'too_few_smart_wallets'].includes(r))) {
-      st.rejected[tok] = { sym: w.sym, fail: 'regate', ts: now }; delete st.watch[tok]; continue; }
+    if (gates(sec(tok), i).some(r => !SOFT.includes(r))) {
+      st.rejected[tok] = { sym: w.sym, fail: ['regate'], ts: now, px0: p, done: [] }; delete st.watch[tok]; continue; }
     if (p <= w.peak * 0.85) {
+      if (haltedToday || Object.keys(st.pos).length >= MAX_OPEN) continue;   // risk limits: skip, keep watching
       const r = await execute({ side: 'buy', token: tok, usd: SIZE, px: p }, { live: LIVE });
-      st.pos[tok] = { sym: w.sym, entry: p, peak: p, left: 1, tp1: false, tp2: false,
-                      creator: Number(info.dev?.creator_token_balance), mode: r.mode };
+      if (!r.ok) { await notify(`BUY MISSED ${w.sym} (${r.reason})`); continue; }
+      st.pos[tok] = { sym: w.sym, entryPx: r.fillPx, peak: r.fillPx, lastPx: r.fillPx, units: r.units, cost: SIZE, proceeds: 0,
+                      costs: r.costUsd, openedTs: now, creator: Number(i.dev?.creator_token_balance), tp1: false, tp2: false, mode: r.mode };
       delete st.watch[tok];
-      await notify(`BUY[${r.mode}] ${w.sym} $${SIZE} @${p} (pullback from ${w.peak})`);
+      await notify(`BUY[${r.mode}] ${w.sym} $${SIZE} fill ${r.fillPx.toPrecision(4)} slip ${r.slipPct.toFixed(1)}% (signal px ${p})`);
     }
   }
   for (const [tok, q] of Object.entries(st.pos)) {
-    const info = gmgn(['token', 'info', '--chain', CHAIN, '--address', tok]), p = px(info);
-    q.peak = Math.max(q.peak, p);
-    const x = p / q.entry, sell = async (frac, why) => {
-      await execute({ side: 'sell', token: tok, usd: SIZE * frac * q.left * x, px: p }, { live: LIVE });
-      q.left = +(q.left - frac * q.left).toFixed(4); await notify(`SELL ${q.sym} ${why} x${x.toFixed(2)}`); };
-    const devSold = Number(info.dev?.creator_token_balance) < q.creator * 0.9;
-    if (devSold) { await sell(1, 'DEV SOLD'); q.left = 0; }
-    else if (x <= 0.65) { await sell(1, 'STOP -35%'); q.left = 0; }
-    else {
-      if (!q.tp1 && x >= 2) { q.tp1 = true; await sell(1 / 3, 'TP1 2x'); }
-      if (!q.tp2 && x >= 4) { q.tp2 = true; await sell(0.5, 'TP2 4x'); }
-      if (q.tp1 && p <= q.peak * 0.75) { await sell(1, 'TRAIL -25%'); q.left = 0; }
+    const i = info(tok), p = px(i), x = p / q.entryPx;
+    q.peak = Math.max(q.peak, p); q.lastPx = p;
+    if (Number(i.dev?.creator_token_balance) < q.creator * 0.9) { await sell(tok, q, 1, 'dev_sold'); continue; }
+    if (x <= 0.65) { await sell(tok, q, 1, 'stop_-35%'); continue; }
+    if (!q.tp1 && x >= 2 && await sell(tok, q, 1 / 3, 'tp1_2x')) q.tp1 = true;
+    if (st.pos[tok] && !q.tp2 && x >= 4 && await sell(tok, q, 0.5, 'tp2_4x')) q.tp2 = true;
+    if (st.pos[tok] && q.tp1 && p <= q.peak * 0.75) await sell(tok, q, 1, 'trail_-25%');
+  }
+  // calibration: price of hard-rejected tokens at +1h / +4h (did the filter save us, or miss a winner?)
+  for (const [tok, r] of Object.entries(st.rejected)) {
+    for (const h of [1, 4]) {
+      if (r.done?.includes(h) || now - r.ts < h * 3600 || now - r.ts > h * 3600 + 1800) continue;
+      try { const p = px(info(tok)); journal({ event: 'reject_followup', token: tok, sym: r.sym, hours: h, x: p / r.px0, fail: r.fail }); } catch { }
+      (r.done ??= []).push(h);
     }
-    if (q.left <= 0.001) delete st.pos[tok];
   }
 }
 

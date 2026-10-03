@@ -31,3 +31,4 @@ yarn-debug.log*
 yarn-error.log*
 trading/trades.log.jsonl
 trading/state.json
+trading/journal.jsonl
