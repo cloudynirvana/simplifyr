@@ -1,0 +1,11 @@
+[Unit]
+Description=GMGN paper-trading bot
+After=network-online.target
+[Service]
+WorkingDirectory=/opt/simplifyr
+EnvironmentFile=/opt/simplifyr/.env.local
+ExecStart=/usr/bin/node trading/bot.mjs
+Restart=always
+RestartSec=10
+[Install]
+WantedBy=multi-user.target
