@@ -1,8 +1,9 @@
 // The agreed filter. Field names verified against live `gmgn-cli token security|info` output.
-export const CFG = {
+export const CFG = { // GATE_OVERRIDE='{"maxAgeS":99999999}' lets you experiment/test without editing code
+ ...{
   maxTop10: 0.30, maxCreatorHold: 0.02, maxCreatorLaunches: 3, maxBundler: 0.20, maxBotDegen: 0.20,
   maxFresh: 0.50, minSmartWallets: 3, minLiquidityUsd: 30000, minAgeS: 900, maxAgeS: 6 * 3600, maxTax: 3,
-};
+}, ...JSON.parse(process.env.GATE_OVERRIDE ?? '{}') };
 
 // Returns list of failure reasons ([] = pass).
 export function gates(sec, info, now = Math.floor(Date.now() / 1000), c = CFG) {

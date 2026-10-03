@@ -51,3 +51,21 @@ If it fails: that is a successful test. It just saved you real money. Adjust one
 ## Live pilot (later, needs your live key + the "jev" executor wired)
 Start with the smallest size (e.g. $5), the same filter, `MAX_OPEN=2`, a daily loss cap you can truly afford. Run paper and live
 side by side for a week and compare fills; recalibrate `paper.mjs` to the real slippage/latency/fail rate. Only then scale up.
+
+## Two strategies, one journal
+- **cluster**: >=3 smart-money/KOL wallets buy the same token -> gates -> watchlist -> enter on a 15% pullback.
+- **mirror**: copy fresh buys (<=120 s old, `MIRROR_MAX_LAG_S`) of *vetted* wallets, same gates minus smart-wallet count and with a 5-minute minimum age; no pullback wait. Exit when the source wallet sells, plus the same stop / take-profit / trail / dev-sold rules.
+`stats.mjs` splits results under `byStrategy`, so you can see which one has an edge. `mirrorCopyLagPctAvg` = how much worse your fill is than the wallet's own price. If that is large, the wallet is not copyable, however good its record.
+
+### Wallet research (eyes for mirroring)
+    node trading/wallets.mjs discover      # pulls active wallets from smart-money/KOL feeds, vets each one
+    node trading/wallets.mjs vet <addr>    # vet one wallet
+    node trading/wallets.mjs add <addr>    # vet + save (only wallets that PASS are mirrored)
+    node trading/wallets.mjs list
+Vetting (30d stats): win rate >= 45%, realized profit >= $50 and ROI >= 5%, <= 20 tokens created (not a dev), 15-600 buys (not a bot), no `arbitrager`/`sniper`/`bundler` tag (`EXCLUDE_TAGS`).
+In the first discovery run, 1 of 20 wallets passed. Re-run `discover` weekly; wallets drift. Use the `gmgn-wallet-score` skill for a deeper look before trusting a wallet.
+
+## Telegram
+1. In Telegram, message @BotFather, send `/newbot`, copy the token.
+2. Put `TELEGRAM_BOT_TOKEN=...` in `.env.local` on the VPS, send your new bot any message, then run `node trading/telegram.mjs chatid` and add the printed `TELEGRAM_CHAT_ID=...` too.
+3. `node trading/telegram.mjs` sends a test message. The bot also sends a daily summary.

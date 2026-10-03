@@ -5,27 +5,25 @@
 // measure whether the filter is catching rugs (good) or missing winners (too strict).
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { gmgn, journal } from './lib.mjs';
-import { gates } from './filter.mjs';
+import { gates, CFG } from './filter.mjs';
 import { execute } from './hands.mjs';
+import { notify } from './telegram.mjs';
+import { loadWallets } from './wallets.mjs';
+import { computeStats } from './stats.mjs';
 
 const CHAIN = process.env.CHAIN ?? 'sol', POLL_MS = Number(process.env.POLL_S ?? 60) * 1000;
 const SIZE = Number(process.env.ORDER_USD ?? 10), LIVE = process.env.LIVE_TRADING === '1';
 const MAX_OPEN = Number(process.env.MAX_OPEN ?? 5), DAILY_STOP = Number(process.env.DAILY_LOSS_USD ?? 30);
 const SOFT = ['too_new', 'too_few_smart_wallets'];
+const MIRROR_CFG = { minAgeS: 300, minSmartWallets: 0 }, MIRROR_MAX_LAG_S = Number(process.env.MIRROR_MAX_LAG_S ?? 120);
 const STATE = new URL('./state.json', import.meta.url).pathname;
 const IGNORE = new Set(['So11111111111111111111111111111111111111112',
   'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
-const st = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : { watch: {}, pos: {}, rejected: {}, day: {} };
-st.day ??= {};
+const st = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : { watch: {}, pos: {}, rejected: {}, day: {}, mirror: {} };
+st.day ??= {}; st.mirror ??= {};
 const save = () => writeFileSync(STATE, JSON.stringify(st, null, 1));
 const today = () => new Date().toISOString().slice(0, 10);
 
-async function notify(msg) {
-  console.log(new Date().toISOString(), msg);
-  const { TELEGRAM_BOT_TOKEN: t, TELEGRAM_CHAT_ID: c } = process.env;
-  if (t && c) await fetch(`https://api.telegram.org/bot${t}/sendMessage`, { method: 'POST',
-    headers: { 'content-type': 'application/json' }, body: JSON.stringify({ chat_id: c, text: msg }) }).catch(() => {});
-}
 const px = i => Number(i.price?.price);
 const info = tok => gmgn(['token', 'info', '--chain', CHAIN, '--address', tok]);
 const sec = tok => gmgn(['token', 'security', '--chain', CHAIN, '--address', tok]);
@@ -57,9 +55,43 @@ async function scan() {
   }
 }
 
+
+// Wallet mirroring: copy fresh buys of VETTED wallets (wallets.mjs), same gates minus smart-wallet count, no pullback wait.
+async function mirrorScan() {
+  const now = Math.floor(Date.now() / 1000);
+  for (const [w, v] of Object.entries(loadWallets())) {
+    if (!v.ok) continue;
+    const m = (st.mirror[w] ??= { last: now });             // first sight: start from now, never backfill old trades
+    const acts = gmgn(['portfolio', 'activity', '--chain', CHAIN, '--wallet', w, '--type', 'buy', '--limit', '20']).activities ?? [];
+    for (const a of acts.filter(a => a.timestamp > m.last).sort((x, y) => x.timestamp - y.timestamp)) {
+      m.last = Math.max(m.last, a.timestamp);
+      const tok = a.token?.address;
+      if (!tok || IGNORE.has(tok) || st.pos[tok] || st.rejected[tok]) continue;
+      if (now - a.timestamp > MIRROR_MAX_LAG_S) { journal({ event: 'mirror_stale', wallet: w, token: tok, lagS: now - a.timestamp }); continue; }
+      if (Object.keys(st.pos).length >= MAX_OPEN || (st.day[today()] ?? 0) <= -DAILY_STOP) continue;
+      const i = info(tok), s = sec(tok), fail = gates(s, i, now, { ...CFG, ...MIRROR_CFG });
+      if (fail.length) { st.rejected[tok] = { sym: a.token.symbol, fail, ts: now, px0: px(i), done: [] };
+        journal({ event: 'reject', strategy: 'mirror', token: tok, sym: a.token.symbol, fail, px0: px(i), snap: snap(s, i) }); continue; }
+      const r = await execute({ side: 'buy', token: tok, usd: SIZE, px: px(i) }, { live: LIVE });
+      if (!r.ok) { await notify(`MIRROR BUY MISSED ${a.token.symbol} (${r.reason})`); continue; }
+      st.pos[tok] = { sym: a.token.symbol, entryPx: r.fillPx, peak: r.fillPx, lastPx: r.fillPx, units: r.units, cost: SIZE, proceeds: 0,
+                      costs: r.costUsd, openedTs: now, strategy: 'mirror', src: w, creator: Number(i.dev?.creator_token_balance), tp1: false, tp2: false, mode: r.mode };
+      const lag = (r.fillPx / Number(a.price_usd) - 1) * 100;
+      journal({ event: 'mirror_entry', wallet: w, token: tok, walletPx: Number(a.price_usd), fillPx: r.fillPx, copyLagPct: lag, delayS: now - a.timestamp });
+      await notify(`MIRROR BUY[${r.mode}] ${a.token.symbol} copying ${w.slice(0, 6)}… fill ${r.fillPx.toPrecision(4)} (${lag.toFixed(1)}% worse than wallet)`);
+    }
+  }
+}
+
+async function dailySummary() {
+  if (st.lastSummary === today()) return;
+  if (st.lastSummary) { const s = computeStats(); await notify(`DAILY: trades ${s.trades} win ${(s.winRate * 100).toFixed(0)}% pnl $${s.totalPnlUsd.toFixed(2)} (costs x2: $${s.pnlIfCostsDoubledUsd.toFixed(2)}) open ${Object.keys(st.pos).length} watch ${Object.keys(st.watch).length}`); }
+  st.lastSummary = today();
+}
+
 async function closeTrip(tok, q, reason) {
   const pnlUsd = q.proceeds - q.cost;
-  journal({ event: 'close', token: tok, sym: q.sym, reason, pnlUsd, pnlPct: pnlUsd / q.cost * 100, costsUsd: q.costs,
+  journal({ event: 'close', token: tok, sym: q.sym, strategy: q.strategy ?? 'cluster', src: q.src, reason, pnlUsd, pnlPct: pnlUsd / q.cost * 100, costsUsd: q.costs,
             holdS: Math.floor(Date.now() / 1000) - q.openedTs, mode: q.mode });
   st.day[today()] = (st.day[today()] ?? 0) + pnlUsd;
   delete st.pos[tok];
@@ -89,7 +121,7 @@ async function manage() {
       const r = await execute({ side: 'buy', token: tok, usd: SIZE, px: p }, { live: LIVE });
       if (!r.ok) { await notify(`BUY MISSED ${w.sym} (${r.reason})`); continue; }
       st.pos[tok] = { sym: w.sym, entryPx: r.fillPx, peak: r.fillPx, lastPx: r.fillPx, units: r.units, cost: SIZE, proceeds: 0,
-                      costs: r.costUsd, openedTs: now, creator: Number(i.dev?.creator_token_balance), tp1: false, tp2: false, mode: r.mode };
+                      costs: r.costUsd, openedTs: now, strategy: 'cluster', creator: Number(i.dev?.creator_token_balance), tp1: false, tp2: false, mode: r.mode };
       delete st.watch[tok];
       await notify(`BUY[${r.mode}] ${w.sym} $${SIZE} fill ${r.fillPx.toPrecision(4)} slip ${r.slipPct.toFixed(1)}% (signal px ${p})`);
     }
@@ -97,6 +129,11 @@ async function manage() {
   for (const [tok, q] of Object.entries(st.pos)) {
     const i = info(tok), p = px(i), x = p / q.entryPx;
     q.peak = Math.max(q.peak, p); q.lastPx = p;
+    if (q.src) {                                            // mirrored position: leave when the source wallet sells
+      const sold = (gmgn(['portfolio', 'activity', '--chain', CHAIN, '--wallet', q.src, '--token', tok, '--type', 'sell', '--limit', '5']).activities ?? [])
+        .some(a => a.timestamp > q.openedTs);
+      if (sold) { await sell(tok, q, 1, 'mirror_exit'); continue; }
+    }
     if (Number(i.dev?.creator_token_balance) < q.creator * 0.9) { await sell(tok, q, 1, 'dev_sold'); continue; }
     if (x <= 0.65) { await sell(tok, q, 1, 'stop_-35%'); continue; }
     if (!q.tp1 && x >= 2 && await sell(tok, q, 1 / 3, 'tp1_2x')) q.tp1 = true;
@@ -115,9 +152,9 @@ async function manage() {
 
 async function loop() {
   for (;;) {
-    try { await scan(); await manage(); save(); } catch (e) { console.error('cycle error:', e.message); }
+    try { await scan(); await mirrorScan(); await manage(); await dailySummary(); save(); } catch (e) { console.error('cycle error:', e.message); }
     await new Promise(r => setTimeout(r, POLL_MS));
   }
 }
-if (process.argv.includes('--once')) { await scan(); await manage(); save(); console.log(JSON.stringify({ watch: st.watch, pos: st.pos, rejected: Object.keys(st.rejected).length }, null, 1)); }
+if (process.argv.includes('--once')) { await scan(); await mirrorScan(); await manage(); save(); console.log(JSON.stringify({ watch: st.watch, pos: st.pos, rejected: Object.keys(st.rejected).length }, null, 1)); }
 else loop();

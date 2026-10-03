@@ -16,7 +16,11 @@ export function computeStats(j = readJournal()) {
   const fu = j.filter(r => r.event === 'reject_followup');
   const fuStat = h => { const a = fu.filter(r => r.hours === h);
     return { n: a.length, pumped2x: a.filter(r => r.x >= 2).length, dumped50: a.filter(r => r.x <= 0.5).length }; };
+  const by = {};
+  for (const t of trips) { const k = t.strategy ?? 'cluster', r = (by[k] ??= { n: 0, wins: 0, pnl: 0 }); r.n++; r.pnl += t.pnlUsd; if (t.pnlUsd > 0) r.wins++; }
+  const lag = j.filter(r => r.event === 'mirror_entry').map(r => r.copyLagPct);
   return {
+    byStrategy: by, mirrorCopyLagPctAvg: avg(lag), mirrorStale: j.filter(r => r.event === 'mirror_stale').length,
     trades: trips.length, winRate: trips.length ? wins.length / trips.length : 0,
     avgWinUsd: avg(wins.map(t => t.pnlUsd)), avgLossUsd: avg(losses.map(t => t.pnlUsd)),
     expectancyUsd: avg(trips.map(t => t.pnlUsd)), profitFactor: gl ? gw / gl : null,
