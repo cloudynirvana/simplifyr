@@ -3,7 +3,8 @@
 // enter on >=15% pullback -> manage: -35% stop, 1/3 @2x, 1/3 @4x, 25% trail on rest, exit on dev sell.
 // Every decision and fill is journaled (journal.jsonl); rejected tokens are followed up at +1h/+4h so we can
 // measure whether the filter is catching rugs (good) or missing winners (too strict).
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { gmgn, journal, RateLimited, rateLimitWaitMs } from './lib.mjs';
 import { gates, CFG } from './filter.mjs';
 import { execute } from './hands.mjs';
@@ -159,7 +160,20 @@ async function manage() {
   }
 }
 
+// Run fingerprint: hash of the code + the settings that change results. Works without git (server copies).
+// Compare runs only when codeHash and settings match.
+function fingerprint() {
+  const dir = new URL('.', import.meta.url).pathname, h = createHash('sha256');
+  for (const f of readdirSync(dir).filter(f => f.endsWith('.mjs')).sort()) h.update(f).update(readFileSync(dir + f));
+  const keys = ['CHAIN', 'ORDER_USD', 'MAX_OPEN', 'DAILY_LOSS_USD', 'BANKROLL_USD', 'TIP_USD', 'FEE_PCT', 'LATENCY_S', 'FAIL_RATE',
+    'SLIPPAGE_BPS', 'QUOTE_SOURCE', 'POLL_S', 'MIRROR_MAX_LAG_S', 'GATE_OVERRIDE', 'JEV_MODE', 'JEV_RUG_MAX', 'EXCLUDE_TAGS'];
+  return { codeHash: h.digest('hex').slice(0, 12), settings: Object.fromEntries(keys.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]])) };
+}
+
 async function loop() {
+  const fp = fingerprint();
+  journal({ event: 'start', ...fp });
+  await notify(`BOT START code ${fp.codeHash} ${JSON.stringify(fp.settings)}`);
   for (;;) {
     try { await manage(); await scan(); await mirrorScan(); await dailySummary(); }
     catch (e) { console.error(e instanceof RateLimited ? e.message : 'cycle error: ' + e.message); }

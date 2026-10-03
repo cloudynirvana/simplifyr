@@ -90,6 +90,7 @@ a meaningful sample, switch to `JEV_MODE=veto` (and that starts a new evaluation
   `stats.mjs` reports `equityUsd`, `returnPct`, `maxDrawdownPctOfBankroll`; the daily Telegram summary leads with equity.
   Suggested for $100: `ORDER_USD=10 MAX_OPEN=3 DAILY_LOSS_USD=20`.
 - `TIP_USD` default is now 0.15 (measured: `gmgn-cli gas-price --chain sol` auto ~0.0009 SOL, MEV-protected 0.001 SOL).
+- Every start journals a `start` event with a code hash + result-affecting settings (also sent to Telegram). Only compare runs with the same hash and settings.
 - Fresh run: stop the bot, `trading/reset.sh` (ARCHIVES journal + state to `trading/archive/<time>/`, never deletes), `trading/run.sh`.
   Every reset starts a new evaluation: don't add numbers across runs that used different settings.
 - GMGN rate limits are per account. Use the key on ONE machine only. After a 429 the bot pauses for the stated reset time

@@ -25,6 +25,7 @@ export function computeStats(j = readJournal()) {
   const lag = j.filter(r => r.event === 'mirror_entry').map(r => r.copyLagPct);
   const bank = Number(process.env.BANKROLL_USD ?? 100);
   return {
+    runs: j.filter(r => r.event === 'start').map(r => ({ at: new Date(r.ts).toISOString(), code: r.codeHash, settings: r.settings })).slice(-5),
     bankrollStartUsd: bank, equityUsd: bank + cum, returnPct: cum / bank * 100, maxDrawdownPctOfBankroll: mdd / bank * 100,
     byStrategy: by, byJev, mirrorCopyLagPctAvg: avg(lag), mirrorStale: j.filter(r => r.event === 'mirror_stale').length,
     trades: trips.length, winRate: trips.length ? wins.length / trips.length : 0,
