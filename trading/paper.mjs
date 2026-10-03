@@ -2,9 +2,10 @@
 // simulated latency. The quote already includes AMM fee + price impact for our exact size. On top we charge
 // the trading-bot platform fee + priority tip and a random tx-failure rate. If no route exists (pool pulled,
 // honeypot), the fill fails, exactly as a real sell would. QUOTE_SOURCE=model falls back to the old estimate.
+// TIP_USD default 0.15 = measured SOL priority fee (gmgn-cli gas-price: auto ~0.0009 SOL, MEV-protected 0.001 SOL) + margin.
 import { gmgn } from './lib.mjs';
 const e = (k, d) => Number(process.env[k] ?? d);
-export const P = { latencyS: e('LATENCY_S', 8), feePct: e('FEE_PCT', 1), tipUsd: e('TIP_USD', 0.5),
+export const P = { latencyS: e('LATENCY_S', 8), feePct: e('FEE_PCT', 1), tipUsd: e('TIP_USD', 0.15),
                    baseSlipPct: e('BASE_SLIP_PCT', 1), failRate: e('FAIL_RATE', 0.05), slippageBps: e('SLIPPAGE_BPS', 3000) };
 const SOL = 'So11111111111111111111111111111111111111112';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -25,7 +26,7 @@ export async function paperFill(order, chain) {
   await sleep(P.latencyS * 1000);
   if (Math.random() < P.failRate) return { ok: false, reason: 'tx_failed' };
   if (chain !== 'sol' || process.env.QUOTE_SOURCE === 'model') return modelFill(order, chain);
-  const info = gmgn(['token', 'info', '--chain', chain, '--address', order.token]);
+  const info = gmgn(['token', 'info', '--chain', chain, '--address', order.token], { ttlMs: 0 }); // fresh price after latency
   const mid = Number(info.price?.price), dec = Number(info.decimals), sol = await solUsd();
   try {
     if (order.side === 'buy') {

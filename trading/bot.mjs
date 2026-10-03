@@ -4,7 +4,7 @@
 // Every decision and fill is journaled (journal.jsonl); rejected tokens are followed up at +1h/+4h so we can
 // measure whether the filter is catching rugs (good) or missing winners (too strict).
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { gmgn, journal } from './lib.mjs';
+import { gmgn, journal, RateLimited, rateLimitWaitMs } from './lib.mjs';
 import { gates, CFG } from './filter.mjs';
 import { execute } from './hands.mjs';
 import { notify } from './telegram.mjs';
@@ -16,6 +16,9 @@ const CHAIN = process.env.CHAIN ?? 'sol', POLL_MS = Number(process.env.POLL_S ??
 const SIZE = Number(process.env.ORDER_USD ?? 10);
 const MAX_OPEN = Number(process.env.MAX_OPEN ?? 5), DAILY_STOP = Number(process.env.DAILY_LOSS_USD ?? 30);
 const SOFT = ['too_new', 'too_few_smart_wallets'];
+// Virtual bankroll: cash = BANKROLL_USD + realized PnL - capital tied up in open positions. No buy if cash < SIZE.
+const BANKROLL = Number(process.env.BANKROLL_USD ?? 100);
+const cash = () => BANKROLL + computeStats().totalPnlUsd - Object.values(st.pos).reduce((a, q) => a + q.cost, 0);
 const MIRROR_CFG = { minAgeS: 300, minSmartWallets: 0 }, MIRROR_MAX_LAG_S = Number(process.env.MIRROR_MAX_LAG_S ?? 120);
 const STATE = new URL('./state.json', import.meta.url).pathname;
 const IGNORE = new Set(['So11111111111111111111111111111111111111112',
@@ -71,7 +74,7 @@ async function mirrorScan() {
       const tok = a.token?.address;
       if (!tok || IGNORE.has(tok) || st.pos[tok] || st.rejected[tok]) continue;
       if (now - a.timestamp > MIRROR_MAX_LAG_S) { journal({ event: 'mirror_stale', wallet: w, token: tok, lagS: now - a.timestamp }); continue; }
-      if (Object.keys(st.pos).length >= MAX_OPEN || (st.day[today()] ?? 0) <= -DAILY_STOP) continue;
+      if (Object.keys(st.pos).length >= MAX_OPEN || cash() < SIZE || (st.day[today()] ?? 0) <= -DAILY_STOP) continue;
       const i = info(tok), s = sec(tok), fail = gates(s, i, now, { ...CFG, ...MIRROR_CFG });
       if (fail.length) { st.rejected[tok] = { sym: a.token.symbol, fail, ts: now, px0: px(i), done: [] };
         journal({ event: 'reject', strategy: 'mirror', token: tok, sym: a.token.symbol, fail, px0: px(i), snap: snap(s, i) }); continue; }
@@ -91,7 +94,7 @@ async function mirrorScan() {
 
 async function dailySummary() {
   if (st.lastSummary === today()) return;
-  if (st.lastSummary) { const s = computeStats(); await notify(`DAILY: trades ${s.trades} win ${(s.winRate * 100).toFixed(0)}% pnl $${s.totalPnlUsd.toFixed(2)} (costs x2: $${s.pnlIfCostsDoubledUsd.toFixed(2)}) open ${Object.keys(st.pos).length} watch ${Object.keys(st.watch).length}`); }
+  if (st.lastSummary) { const s = computeStats(); await notify(`DAILY: equity $${(BANKROLL + s.totalPnlUsd).toFixed(2)} of $${BANKROLL} | trades ${s.trades} win ${(s.winRate * 100).toFixed(0)}% pnl $${s.totalPnlUsd.toFixed(2)} (costs x2: $${s.pnlIfCostsDoubledUsd.toFixed(2)}) open ${Object.keys(st.pos).length} watch ${Object.keys(st.watch).length}`); }
   st.lastSummary = today();
 }
 
@@ -123,7 +126,7 @@ async function manage() {
     if (gates(sec(tok), i).some(r => !SOFT.includes(r))) {
       st.rejected[tok] = { sym: w.sym, fail: ['regate'], ts: now, px0: p, done: [] }; delete st.watch[tok]; continue; }
     if (p <= w.peak * 0.85) {
-      if (haltedToday || Object.keys(st.pos).length >= MAX_OPEN) continue;   // risk limits: skip, keep watching
+      if (haltedToday || Object.keys(st.pos).length >= MAX_OPEN || cash() < SIZE) continue;   // risk limits: skip, keep watching
       const r = await execute({ side: 'buy', token: tok, usd: SIZE, px: p });
       if (!r.ok) { await notify(`BUY MISSED ${w.sym} (${r.reason})`); continue; }
       st.pos[tok] = { sym: w.sym, entryPx: r.fillPx, peak: r.fillPx, lastPx: r.fillPx, units: r.units, cost: SIZE, proceeds: 0,
@@ -158,8 +161,10 @@ async function manage() {
 
 async function loop() {
   for (;;) {
-    try { await scan(); await mirrorScan(); await manage(); await dailySummary(); save(); } catch (e) { console.error('cycle error:', e.message); }
-    await new Promise(r => setTimeout(r, POLL_MS));
+    try { await manage(); await scan(); await mirrorScan(); await dailySummary(); }
+    catch (e) { console.error(e instanceof RateLimited ? e.message : 'cycle error: ' + e.message); }
+    save();                                           // always persist partial progress (e.g. after a fill)
+    await new Promise(r => setTimeout(r, Math.max(POLL_MS, rateLimitWaitMs())));
   }
 }
 if (process.argv.includes('--once')) { await scan(); await mirrorScan(); await manage(); save(); console.log(JSON.stringify({ watch: st.watch, pos: st.pos, rejected: Object.keys(st.rejected).length }, null, 1)); }

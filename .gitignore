@@ -33,3 +33,4 @@ trading/trades.log.jsonl
 trading/state.json
 trading/journal.jsonl
 trading/wallets.json
+trading/archive/

@@ -84,3 +84,13 @@ Jev is a decision model, not an execution API: it returns probabilities (rug wit
 Every candidate that passes the hard gates is scored and the verdict is stored on the position. `stats.mjs` -> `byJev`
 groups closed trades by Jev's verdict. Only if trades Jev said `skip` (or `+rugHigh`) clearly lose more than the rest, over
 a meaningful sample, switch to `JEV_MODE=veto` (and that starts a new evaluation version). Cost is ~550 tokens/call, about $0.00002.
+
+## Bankroll, resets, rate limits
+- `BANKROLL_USD` (default 100): virtual cash = bankroll + realized PnL - capital in open positions; no new buy if cash < `ORDER_USD`.
+  `stats.mjs` reports `equityUsd`, `returnPct`, `maxDrawdownPctOfBankroll`; the daily Telegram summary leads with equity.
+  Suggested for $100: `ORDER_USD=10 MAX_OPEN=3 DAILY_LOSS_USD=20`.
+- `TIP_USD` default is now 0.15 (measured: `gmgn-cli gas-price --chain sol` auto ~0.0009 SOL, MEV-protected 0.001 SOL).
+- Fresh run: stop the bot, `trading/reset.sh` (ARCHIVES journal + state to `trading/archive/<time>/`, never deletes), `trading/run.sh`.
+  Every reset starts a new evaluation: don't add numbers across runs that used different settings.
+- GMGN rate limits are per account. Use the key on ONE machine only. After a 429 the bot pauses for the stated reset time
+  (hammering extends the ban), re-uses reads cached for 20 s, and manages open positions before scanning so exits come first.
