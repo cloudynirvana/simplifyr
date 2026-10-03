@@ -22,12 +22,16 @@ export function computeStats(j = readJournal()) {
   const byJev = {};
   for (const t of trips) { if (!t.jev || t.jev.error) continue;
     const k = `${t.jev.action}${t.jev.rug >= 0.5 ? '+rugHigh' : ''}`, r = (byJev[k] ??= { n: 0, wins: 0, pnl: 0 }); r.n++; r.pnl += t.pnlUsd; if (t.pnlUsd > 0) r.wins++; }
+  // Memecoin research views: which entry phase pays, and how much of the move we capture.
+  const byEntryPhase = {};
+  for (const t of trips) { const k = t.entryPhase ?? 'n/a', r = (byEntryPhase[k] ??= { n: 0, wins: 0, pnl: 0 }); r.n++; r.pnl += t.pnlUsd; if (t.pnlUsd > 0) r.wins++; }
+  const capture = trips.filter(t => t.peakX > 1).map(t => (1 + t.pnlPct / 100) / t.peakX);   // exit value vs best price seen
   const lag = j.filter(r => r.event === 'mirror_entry').map(r => r.copyLagPct);
   const bank = Number(process.env.BANKROLL_USD ?? 100);
   return {
     runs: j.filter(r => r.event === 'start').map(r => ({ at: new Date(r.ts).toISOString(), code: r.codeHash, settings: r.settings })).slice(-5),
     bankrollStartUsd: bank, equityUsd: bank + cum, returnPct: cum / bank * 100, maxDrawdownPctOfBankroll: mdd / bank * 100,
-    byStrategy: by, byJev, mirrorCopyLagPctAvg: avg(lag), mirrorStale: j.filter(r => r.event === 'mirror_stale').length,
+    byStrategy: by, byJev, byEntryPhase, avgPeakCapture: avg(capture), klineErrors: j.filter(r => r.event === 'kline_error').length, mirrorCopyLagPctAvg: avg(lag), mirrorStale: j.filter(r => r.event === 'mirror_stale').length,
     trades: trips.length, winRate: trips.length ? wins.length / trips.length : 0,
     avgWinUsd: avg(wins.map(t => t.pnlUsd)), avgLossUsd: avg(losses.map(t => t.pnlUsd)),
     expectancyUsd: avg(trips.map(t => t.pnlUsd)), profitFactor: gl ? gw / gl : null,

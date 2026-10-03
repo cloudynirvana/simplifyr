@@ -1,5 +1,7 @@
 # Paper-trading protocol
 
+See `MEMECOIN.md` for the market model (wave phases, flow, memecoin-specific exits) the bot trades on.
+
 Goal: find out, with fake money, whether this filter has an edge *after* real-world friction, before any live key exists.
 Paper trading is always optimistic. Everything below exists to shrink that gap, and to judge results with a haircut.
 
