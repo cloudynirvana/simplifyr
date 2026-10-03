@@ -13,9 +13,12 @@ const int = n => BigInt(Math.floor(n)).toString();
 
 async function jupQuote(inMint, outMint, amount) {
   const u = `https://lite-api.jup.ag/swap/v1/quote?inputMint=${inMint}&outputMint=${outMint}&amount=${amount}&slippageBps=${P.slippageBps}`;
-  const r = await fetch(u); const d = await r.json();
-  if (!r.ok || !d.outAmount) throw new Error(d.error ?? `quote http ${r.status}`);
-  return d;
+  for (let k = 0; ; k++) {                                     // free Jupiter API throttles: back off, don't hammer
+    const r = await fetch(u); const d = await r.json().catch(() => ({}));
+    if (r.status === 429 && k < 3) { await sleep(1500 * 2 ** k); continue; }
+    if (!r.ok || !d.outAmount) throw new Error(d.error ?? `quote http ${r.status}`);
+    return d;
+  }
 }
 async function solUsd() {
   const d = await (await fetch(`https://lite-api.jup.ag/price/v3?ids=${SOL}`)).json();

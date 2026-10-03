@@ -29,13 +29,23 @@ const STATE = new URL('./state.json', import.meta.url).pathname;
 const IGNORE = new Set(['So11111111111111111111111111111111111111112',
   'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
 const st = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : {};
-for (const k of ['watch', 'pos', 'rejected', 'day', 'mirror', 'sells']) st[k] ??= {};
+for (const k of ['watch', 'pos', 'rejected', 'day', 'week', 'mirror', 'sells']) st[k] ??= {};
 const save = () => writeFileSync(STATE, JSON.stringify(st, null, 1));
 const today = () => new Date().toISOString().slice(0, 10);
 const nowS = () => Math.floor(Date.now() / 1000);
 // Virtual bankroll: cash = bankroll + realized PnL - capital tied up in open positions. No buy if cash < SIZE.
-const cash = () => BANKROLL + computeStats().totalPnlUsd - Object.values(st.pos).reduce((a, q) => a + q.cost, 0);
-const canBuy = () => Object.keys(st.pos).length < MAX_OPEN && cash() >= SIZE && (st.day[today()] ?? 0) > -DAILY_STOP;
+const realPos = () => Object.values(st.pos).filter(q => !q.shadow);
+const cash = () => BANKROLL + computeStats().totalPnlUsd - realPos().reduce((a, q) => a + q.cost, 0);
+const week = () => { const d = new Date(); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); };
+const WEEKLY_STOP = env('WEEKLY_LOSS_USD', 30);
+const canBuy = () => realPos().length < MAX_OPEN && cash() >= SIZE && (st.day[today()] ?? 0) > -DAILY_STOP && (st.week[week()] ?? 0) > -WEEKLY_STOP;
+// SHADOW COHORTS (research, no bankroll): a token that fails exactly ONE relaxable gate is still paper-traded with the same
+// entry/exit logic, labelled 'shadow:<gate>'. That measures what each gate costs or saves, per gate, after real costs.
+// Hard safety gates (honeypot, can't sell, tax, mint/freeze authority) are never relaxed.
+const SHADOW_GATES = (process.env.SHADOW_GATES ?? 'low_liquidity,bots,bundlers,fresh_wallets,serial_launcher,too_few_smart_wallets,top10_holders,copied_image').split(',').filter(Boolean);
+const SHADOW_MAX = env('SHADOW_MAX_OPEN', 8), SHADOW_MIN_LIQ = env('SHADOW_MIN_LIQ', 10000);
+const canShadow = () => Object.values(st.pos).filter(q => q.shadow).length < SHADOW_MAX;
+const shadowGate = (fail, i) => fail.length === 1 && SHADOW_GATES.includes(fail[0]) && Number(i.liquidity) >= SHADOW_MIN_LIQ ? fail[0] : null;
 
 const px = i => Number(i.price?.price);
 const info = (tok, ttlMs) => gmgn(['token', 'info', '--chain', CHAIN, '--address', tok], ttlMs === undefined ? {} : { ttlMs });
@@ -74,13 +84,16 @@ async function scan() {
   for (const [tok, c] of by) {
     if (c.w.size < 3 || st.watch[tok] || st.pos[tok] || st.rejected[tok]) continue;
     const i = info(tok), s = sec(tok), fail = gates(s, i);
-    if (fail.length) { if (!fail.every(r => SOFT.includes(r))) reject(tok, c.sym, fail, px(i), { snap: snap(s, i) }); continue; }
+    const shadow = fail.length ? shadowGate(fail, i) : null;
+    if (fail.length && !shadow) { if (!fail.every(r => SOFT.includes(r))) reject(tok, c.sym, fail, px(i), { snap: snap(s, i) }); continue; }
+    if (shadow) journal({ event: 'reject', token: tok, sym: c.sym, fail, px0: px(i), snap: snap(s, i), shadowed: shadow });
     const kf = candles(tok), fl = flow(i), f = feats(kf, fl);
     const jev = await jevAssess(jevState(s, i, { wave_phase: f.phase, drawdown_from_high: kf?.drawdown, slope_20m: kf?.slope,
       buy_ratio_1m: fl.buyRatio1m, buy_ratio_5m: fl.buyRatio5m, volume_accel: fl.volAccel }));
-    journal({ event: 'signal', token: tok, sym: c.sym, wallets: c.w.size, px: px(i), snap: snap(s, i), ...f, jev });
+    journal({ event: 'signal', token: tok, sym: c.sym, wallets: c.w.size, px: px(i), snap: snap(s, i), ...f, jev, shadow });
     if (jevVeto(jev)) { reject(tok, c.sym, ['jev_veto'], px(i), { jev }); continue; }
-    st.watch[tok] = { sym: c.sym, peak: px(i), ts: now, jev, wallets: c.w.size };
+    st.watch[tok] = { sym: c.sym, peak: px(i), ts: now, jev, wallets: c.w.size, shadow };
+    if (shadow) continue;                                   // shadow cohorts: no alerts
     await notify(`WATCH ${c.sym} ${tok} wallets=${c.w.size} phase=${f.phase}${jev && !jev.error ? ` | Jev ${jev.action} ${(jev.conf * 100).toFixed(0)}%, rug ${(jev.rug * 100).toFixed(0)}%` : ''}`);
   }
 }
@@ -91,24 +104,24 @@ async function watchlist() {
     if (now - w.ts > 7200) { journal({ event: 'watch_expired', token: tok, sym: w.sym }); delete st.watch[tok]; continue; }
     const i = info(tok), p = px(i);
     w.peak = Math.max(w.peak, p);
-    if (gates(sec(tok), i).some(r => !SOFT.includes(r))) { reject(tok, w.sym, ['regate'], p); delete st.watch[tok]; continue; }
+    if (gates(sec(tok), i).some(r => !SOFT.includes(r) && r !== w.shadow)) { reject(tok, w.sym, ['regate'], p); delete st.watch[tok]; continue; }
     const kf = candles(tok), fl = flow(i), f = feats(kf, fl);
     if (BAD_PHASES.includes(f.phase)) { reject(tok, w.sym, ['phase_' + f.phase], p, f); delete st.watch[tok]; continue; }
     const trigger = ENTRY_MODE === 'pullback' ? p <= w.peak * 0.85 : waveEntry(kf ?? {}, fl).ok;
-    if (!trigger || !canBuy()) continue;
-    await openPos(tok, { sym: w.sym, strategy: 'cluster', jev: w.jev, i, p, f });
+    if (!trigger || !(w.shadow ? canShadow() : canBuy())) continue;
+    await openPos(tok, { sym: w.sym, strategy: w.shadow ? 'shadow:' + w.shadow : 'cluster', shadow: w.shadow, jev: w.jev, i, p, f });
   }
 }
 
-async function openPos(tok, { sym, strategy, src, jev, i, p, f }) {
+async function openPos(tok, { sym, strategy, src, shadow, jev, i, p, f }) {
   const r = await execute({ side: 'buy', token: tok, usd: SIZE, px: p });
   if (!r.ok) { journal({ event: 'buy_missed', token: tok, sym, reason: r.reason }); await notify(`BUY MISSED ${sym} (${r.reason})`); return null; }
-  st.pos[tok] = { sym, strategy, src, jev, entryPx: r.fillPx, peak: r.fillPx, lastPx: r.fillPx, units: r.units, cost: SIZE, proceeds: 0,
+  st.pos[tok] = { sym, strategy, src, shadow, jev, entryPx: r.fillPx, peak: r.fillPx, lastPx: r.fillPx, units: r.units, cost: SIZE, proceeds: 0,
     costs: r.costUsd, openedTs: nowS(), creator: Number(i.dev?.creator_token_balance), entryLiq: Number(i.liquidity), tp1: false, tp2: false,
     entry: f, mode: r.mode };
   delete st.watch[tok];
-  journal({ event: 'entry', token: tok, sym, strategy, src, fillPx: r.fillPx, signalPx: p, ...f, jev });
-  await notify(`BUY[${r.mode}] ${strategy} ${sym} $${SIZE} fill ${r.fillPx.toPrecision(4)} slip ${r.slipPct.toFixed(1)}% phase=${f.phase}`);
+  journal({ event: 'entry', token: tok, sym, strategy, src, shadow, fillPx: r.fillPx, signalPx: p, ...f, jev });
+  if (!shadow) await notify(`BUY[${r.mode}] ${strategy} ${sym} $${SIZE} fill ${r.fillPx.toPrecision(4)} slip ${r.slipPct.toFixed(1)}% phase=${f.phase}`);
   return r;
 }
 
@@ -159,21 +172,21 @@ async function dailySummary() {
 // ---------- FAST LOOP ----------
 async function closeTrip(tok, q, reason, exitF) {
   const pnlUsd = q.proceeds - q.cost;
-  journal({ event: 'close', token: tok, sym: q.sym, strategy: q.strategy ?? 'cluster', src: q.src, jev: q.jev, reason, pnlUsd,
+  journal({ event: 'close', token: tok, sym: q.sym, strategy: q.strategy ?? 'cluster', shadow: q.shadow, src: q.src, jev: q.jev, reason, pnlUsd,
     pnlPct: pnlUsd / q.cost * 100, costsUsd: q.costs, holdS: nowS() - q.openedTs, peakX: q.peak / q.entryPx,
     entryPhase: q.entry?.phase, entry: q.entry, exit: exitF, mode: q.mode });
-  st.day[today()] = (st.day[today()] ?? 0) + pnlUsd;
+  if (!q.shadow) { st.day[today()] = (st.day[today()] ?? 0) + pnlUsd; st.week[week()] = (st.week[week()] ?? 0) + pnlUsd; }
   delete st.pos[tok];
   // never re-buy a token we just exited (esp. after a rug signal); its +1h/+4h price is followed up to grade the exit
   st.rejected[tok] = { sym: q.sym, fail: ['exited_' + reason], ts: nowS(), px0: q.lastPx, done: [] };
-  await notify(`CLOSED ${q.sym} ${reason} pnl ${pnlUsd.toFixed(2)} (${(pnlUsd / q.cost * 100).toFixed(0)}%), peak ${(q.peak / q.entryPx).toFixed(2)}x`);
+  if (!q.shadow) await notify(`CLOSED ${q.sym} ${reason} pnl ${pnlUsd.toFixed(2)} (${(pnlUsd / q.cost * 100).toFixed(0)}%), peak ${(q.peak / q.entryPx).toFixed(2)}x`);
 }
 
 async function sell(tok, q, frac, why, exitF) {
   const r = await execute({ side: 'sell', token: tok, units: q.units * frac, px: q.lastPx });
   if (!r.ok) { journal({ event: 'sell_failed', token: tok, sym: q.sym, why, reason: r.reason }); await notify(`SELL FAILED ${q.sym} ${why} (${r.reason}), retrying`); return false; }
   q.units -= r.units; q.proceeds += r.usd; q.costs += r.costUsd;
-  await notify(`SELL[${r.mode}] ${q.sym} ${why} fill ${r.fillPx.toPrecision(4)} slip ${r.slipPct.toFixed(1)}%`);
+  if (!q.shadow) await notify(`SELL[${r.mode}] ${q.sym} ${why} fill ${r.fillPx.toPrecision(4)} slip ${r.slipPct.toFixed(1)}%`);
   if (frac >= 1 || q.units < 1e-9) await closeTrip(tok, q, why, exitF);
   return true;
 }
@@ -181,6 +194,10 @@ async function sell(tok, q, frac, why, exitF) {
 async function positions() {
   for (const [tok, q] of Object.entries(st.pos)) {
     const i = info(tok, 5000), p = px(i), x = p / q.entryPx, fl = flow(i), held = (nowS() - q.openedTs) / 60;
+    if (p > q.lastPx * 3 && !(q.jumpPx && Math.abs(p / q.jumpPx - 1) < 0.3)) {
+      q.jumpPx = p; journal({ event: 'suspect_tick', token: tok, sym: q.sym, px: p, lastPx: q.lastPx }); continue;
+    }
+    q.jumpPx = null;
     q.peak = Math.max(q.peak, p); q.lastPx = p;
     const ex = { x, fromPeak: p / q.peak, heldMin: held, fl };
     const smartSellers = Object.values(st.sells[tok] ?? {}).filter(ts => ts > q.openedTs).length;
@@ -207,7 +224,7 @@ function fingerprint() {
   const dir = new URL('.', import.meta.url).pathname, h = createHash('sha256');
   for (const f of readdirSync(dir).filter(f => f.endsWith('.mjs')).sort()) h.update(f).update(readFileSync(dir + f));
   const keys = ['CHAIN', 'ENTRY_MODE', 'ORDER_USD', 'MAX_OPEN', 'DAILY_LOSS_USD', 'BANKROLL_USD', 'TIP_USD', 'FEE_PCT', 'LATENCY_S', 'FAIL_RATE',
-    'SLIPPAGE_BPS', 'QUOTE_SOURCE', 'POLL_S', 'POS_POLL_S', 'STALE_MIN', 'MIRROR_MAX_LAG_S', 'GATE_OVERRIDE', 'JEV_MODE', 'JEV_RUG_MAX', 'EXCLUDE_TAGS', 'GMGN_TIER'];
+    'SLIPPAGE_BPS', 'QUOTE_SOURCE', 'POLL_S', 'POS_POLL_S', 'STALE_MIN', 'WEEKLY_LOSS_USD', 'SHADOW_GATES', 'SHADOW_MAX_OPEN', 'SHADOW_MIN_LIQ', 'MIRROR_MAX_LAG_S', 'GATE_OVERRIDE', 'JEV_MODE', 'JEV_RUG_MAX', 'EXCLUDE_TAGS', 'GMGN_TIER'];
   return { codeHash: h.digest('hex').slice(0, 12), settings: Object.fromEntries(keys.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]])) };
 }
 
