@@ -46,3 +46,14 @@ drawdown < 30%. Shadow cohorts inform settings; they never count toward the pass
 ## 7. Report format (daily, not every 30 min)
 `node trading/stats.mjs` (equity, trades, byStrategy incl. shadows, byReason, byEntryPhase, avgPeakCapture, klineErrors, runs)
 + `node trading/analyze.mjs 1` + count of `suspect_tick` + any `cycle error` lines. No setting changes mid-run.
+
+## 8. Funnel fix (after 30h, 1,617 rejects, 0 real signals)
+Diagnosis: the smart-money feed mostly surfaces tokens minutes after launch, when they are bonding-curve tokens with low
+liquidity and heavy bots/bundlers. Two problems followed:
+- **Banned at birth.** A token failing `too_new` AND anything else was rejected forever, judged on launch-time stats.
+  Now any `too_new` token is DEFERRED (`deferred` event) and re-evaluated with fresh data once it reaches minimum age.
+- **Wrong universe.** New source `trending`: GMGN rank filtered server-side by our own gates (liquidity, >=3 smart holders,
+  age 15m-6h, bundler rate, top-10 share, dev holdings). Candidates already sit where the gates allow; full gates still run.
+  `SOURCES=smart,trending` (default). Trending trades are labelled `trending` in byStrategy, separate from `cluster`.
+`node trading/analyze.mjs` now prints the funnel (rejects, signals and deferrals by source, entries, closes).
+This is a strategy change: new run (`reset.sh`), new code hash. Gates and exits are unchanged.

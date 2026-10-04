@@ -22,6 +22,10 @@ const rows = Object.entries(groups).map(([k, a]) => {
     'pct<=0.5x': +(100 * a.filter(x => x <= 0.5).length / a.length).toFixed(1),
     'evCapped5x_afterCost%': +((capped.reduce((s, x) => s + x, 0) / a.length - 1 - COST) * 100).toFixed(1) };
 }).sort((a, b) => b.n - a.n);
+// Funnel: where candidates come from and where they die.
+const ev = k => j.filter(r => r.event === k);
+const bySrc = {}; for (const r of [...ev('signal'), ...ev('deferred')]) { const k = `${r.event}:${r.src ?? 'smart'}`; bySrc[k] = (bySrc[k] ?? 0) + 1; }
+console.log('Funnel:', { rejects: ev('reject').length, ...bySrc, entries: ev('entry').length, closes: ev('close').length });
 console.log(`Rejected-token outcomes at +${H}h (buy-and-hold, cost ${COST * 100}%):`);
 console.table(rows);
 console.log('Read: a gate whose "only:" cohort has evCapped5x_afterCost% clearly below ALL is protecting you; one near or above\n' +

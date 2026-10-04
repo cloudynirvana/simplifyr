@@ -24,12 +24,24 @@ const POLL_MS = env('POLL_S', 60) * 1000, POS_POLL_MS = env('POS_POLL_S', 15) * 
 const SIZE = env('ORDER_USD', 10), MAX_OPEN = env('MAX_OPEN', 5), DAILY_STOP = env('DAILY_LOSS_USD', 30);
 const BANKROLL = env('BANKROLL_USD', 100), STALE_MIN = env('STALE_MIN', 45);
 const SOFT = ['too_new', 'too_few_smart_wallets'];
+// Candidate sources. 'smart' = >=3 smart/KOL buyers in 1h (catches launches: mostly botted/bundled, fails gates).
+// 'trending' = GMGN rank pre-filtered SERVER-SIDE with our own gates (liquidity, smart holders, age window, bundlers, top10, dev),
+// so candidates already live in the universe the gates allow. One weight-3 call per scan.
+const SOURCES = (process.env.SOURCES ?? 'smart,trending').split(',');
+function trendingCandidates() {
+  const r = gmgn(['market', 'trending', '--chain', CHAIN, '--interval', '1h', '--order-by', 'volume', '--limit', '50',
+    '--min-liquidity', String(CFG.minLiquidityUsd), '--min-smart-degen-count', String(CFG.minSmartWallets),
+    '--min-created', `${Math.round(CFG.minAgeS / 60)}m`, '--max-created', `${Math.round(CFG.maxAgeS / 3600)}h`,
+    '--max-bundler-rate', String(CFG.maxBundler), '--max-top10-holder-rate', String(CFG.maxTop10),
+    '--max-dev-team-hold-rate', String(CFG.maxCreatorHold)], { ttlMs: 50000 });
+  return r.rank ?? r.data?.rank ?? r.list ?? [];
+}
 const MIRROR_CFG = { minAgeS: 300, minSmartWallets: 0 }, MIRROR_MAX_LAG_S = env('MIRROR_MAX_LAG_S', 120);
 const STATE = new URL('./state.json', import.meta.url).pathname;
 const IGNORE = new Set(['So11111111111111111111111111111111111111112',
   'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
 const st = existsSync(STATE) ? JSON.parse(readFileSync(STATE, 'utf8')) : {};
-for (const k of ['watch', 'pos', 'rejected', 'day', 'week', 'mirror', 'sells']) st[k] ??= {};
+for (const k of ['watch', 'pos', 'rejected', 'day', 'week', 'mirror', 'sells', 'pending']) st[k] ??= {};
 const save = () => writeFileSync(STATE, JSON.stringify(st, null, 1));
 const today = () => new Date().toISOString().slice(0, 10);
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -77,22 +89,43 @@ async function scan() {
       c.w.add(t.maker); by.set(t.base_address, c);
     }
   }
+  if (SOURCES.includes('trending')) {
+    try {
+      for (const t of trendingCandidates()) {
+        if (!t.address || IGNORE.has(t.address) || by.has(t.address)) continue;
+        by.set(t.address, { sym: t.symbol, w: new Set(), src: 'trending', smartHolders: t.smart_degen_count });
+      }
+    } catch (e) { if (e instanceof RateLimited) throw e; journal({ event: 'source_error', src: 'trending', err: String(e.message).slice(0, 200) }); }
+  }
+  // Tokens deferred for being too new: re-evaluate once old enough (launch-time stats are not a verdict; a 2-minute-old
+  // bonding-curve token ALWAYS shows low liquidity and heavy bots). Give up 2h after the recheck time.
+  for (const [tok, d] of Object.entries(st.pending)) {
+    if (now < d.at) continue;
+    delete st.pending[tok];
+    if (now - d.at < 7200 && !by.has(tok)) by.set(tok, { sym: d.sym, w: new Set(), src: 'deferred' });
+  }
   for (const [tok, s] of Object.entries(st.sells)) {          // prune old sell memory
     for (const [m, ts] of Object.entries(s)) if (now - ts > 6 * 3600) delete s[m];
     if (!Object.keys(s).length) delete st.sells[tok];
   }
   for (const [tok, c] of by) {
-    if (c.w.size < 3 || st.watch[tok] || st.pos[tok] || st.rejected[tok]) continue;
+    if ((c.src ?? 'smart') === 'smart' && (c.w.size < 3 || !SOURCES.includes('smart'))) continue;
+    if (st.watch[tok] || st.pos[tok] || st.rejected[tok] || st.pending[tok]) continue;
     const i = info(tok), s = sec(tok), fail = gates(s, i);
+    if (fail.includes('too_new')) {                           // defer, don't ban: recheck when it reaches minimum age
+      st.pending[tok] = { sym: c.sym, at: Number(i.creation_timestamp) + CFG.minAgeS };
+      journal({ event: 'deferred', token: tok, sym: c.sym, src: c.src ?? 'smart', fail, recheckAt: st.pending[tok].at });
+      continue;
+    }
     const shadow = fail.length ? shadowGate(fail, i) : null;
     if (fail.length && !shadow) { if (!fail.every(r => SOFT.includes(r))) reject(tok, c.sym, fail, px(i), { snap: snap(s, i) }); continue; }
     if (shadow) journal({ event: 'reject', token: tok, sym: c.sym, fail, px0: px(i), snap: snap(s, i), shadowed: shadow });
     const kf = candles(tok), fl = flow(i), f = feats(kf, fl);
     const jev = await jevAssess(jevState(s, i, { wave_phase: f.phase, drawdown_from_high: kf?.drawdown, slope_20m: kf?.slope,
       buy_ratio_1m: fl.buyRatio1m, buy_ratio_5m: fl.buyRatio5m, volume_accel: fl.volAccel }));
-    journal({ event: 'signal', token: tok, sym: c.sym, wallets: c.w.size, px: px(i), snap: snap(s, i), ...f, jev, shadow });
+    journal({ event: 'signal', token: tok, sym: c.sym, src: c.src ?? 'smart', wallets: c.w.size, px: px(i), snap: snap(s, i), ...f, jev, shadow });
     if (jevVeto(jev)) { reject(tok, c.sym, ['jev_veto'], px(i), { jev }); continue; }
-    st.watch[tok] = { sym: c.sym, peak: px(i), ts: now, jev, wallets: c.w.size, shadow };
+    st.watch[tok] = { sym: c.sym, peak: px(i), ts: now, jev, wallets: c.w.size, shadow, src: c.src ?? 'smart' };
     if (shadow) continue;                                   // shadow cohorts: no alerts
     await notify(`WATCH ${c.sym} ${tok} wallets=${c.w.size} phase=${f.phase}${jev && !jev.error ? ` | Jev ${jev.action} ${(jev.conf * 100).toFixed(0)}%, rug ${(jev.rug * 100).toFixed(0)}%` : ''}`);
   }
@@ -109,7 +142,7 @@ async function watchlist() {
     if (BAD_PHASES.includes(f.phase)) { reject(tok, w.sym, ['phase_' + f.phase], p, f); delete st.watch[tok]; continue; }
     const trigger = ENTRY_MODE === 'pullback' ? p <= w.peak * 0.85 : waveEntry(kf ?? {}, fl).ok;
     if (!trigger || !(w.shadow ? canShadow() : canBuy())) continue;
-    await openPos(tok, { sym: w.sym, strategy: w.shadow ? 'shadow:' + w.shadow : 'cluster', shadow: w.shadow, jev: w.jev, i, p, f });
+    await openPos(tok, { sym: w.sym, strategy: w.shadow ? 'shadow:' + w.shadow : (w.src === 'trending' ? 'trending' : 'cluster'), shadow: w.shadow, jev: w.jev, i, p, f });
   }
 }
 
@@ -224,7 +257,7 @@ function fingerprint() {
   const dir = new URL('.', import.meta.url).pathname, h = createHash('sha256');
   for (const f of readdirSync(dir).filter(f => f.endsWith('.mjs')).sort()) h.update(f).update(readFileSync(dir + f));
   const keys = ['CHAIN', 'ENTRY_MODE', 'ORDER_USD', 'MAX_OPEN', 'DAILY_LOSS_USD', 'BANKROLL_USD', 'TIP_USD', 'FEE_PCT', 'LATENCY_S', 'FAIL_RATE',
-    'SLIPPAGE_BPS', 'QUOTE_SOURCE', 'POLL_S', 'POS_POLL_S', 'STALE_MIN', 'WEEKLY_LOSS_USD', 'SHADOW_GATES', 'SHADOW_MAX_OPEN', 'SHADOW_MIN_LIQ', 'MIRROR_MAX_LAG_S', 'GATE_OVERRIDE', 'JEV_MODE', 'JEV_RUG_MAX', 'EXCLUDE_TAGS', 'GMGN_TIER'];
+    'SLIPPAGE_BPS', 'QUOTE_SOURCE', 'SOURCES', 'POLL_S', 'POS_POLL_S', 'STALE_MIN', 'WEEKLY_LOSS_USD', 'SHADOW_GATES', 'SHADOW_MAX_OPEN', 'SHADOW_MIN_LIQ', 'MIRROR_MAX_LAG_S', 'GATE_OVERRIDE', 'JEV_MODE', 'JEV_RUG_MAX', 'EXCLUDE_TAGS', 'GMGN_TIER'];
   return { codeHash: h.digest('hex').slice(0, 12), settings: Object.fromEntries(keys.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]])) };
 }
 
