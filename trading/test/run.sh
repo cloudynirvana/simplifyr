@@ -23,5 +23,8 @@ rm -f trading/journal.jsonl trading/state.json; sc "{\"px\":1.4,\"liq\":15000,\"
 check "$(grep -o '"strategy":"shadow:low_liquidity"' trading/journal.jsonl | head -1)" '"strategy":"shadow:low_liquidity"' "near-miss goes to shadow cohort"
 rm -f trading/journal.jsonl trading/state.json; sc "{\"px\":1.4,$BASE,\"klEnd\":1.4,\"trending\":true}"; SOURCES=trending run
 check "$(grep -o '"strategy":"trending"' trading/journal.jsonl | head -1)" '"strategy":"trending"' "trending source entry"
+rm -f trading/journal.jsonl; node -e 'const r={};for(let k=0;k<600;k++)r["R"+k]={sym:"R"+k,ts:1000+k};require("fs").writeFileSync("trading/state.json",JSON.stringify({rejected:r}))'
+sc "{\"px\":1.4,$BASE,\"klEnd\":1.4}"; run
+check "$(node -e 'const r=JSON.parse(require("fs").readFileSync("trading/state.json")).rejected;console.log(Object.keys(r).length+" "+("R599" in r)+" "+("R0" in r))')" "500 true false" "rejected list capped at 500, newest kept"
 node trading/test/unit.mjs || fail=1     # offline unit tests (counters, retries, ...)
 exit $fail

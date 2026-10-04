@@ -19,7 +19,7 @@ process.stdout.write(JSON.stringify({ symbol: 'T', decimals: 6, liquidity: '8000
 chmodSync(join(BIN, 'gmgn-cli'), 0o755);
 Object.assign(process.env, { PATH: BIN + ':' + process.env.PATH, GMGN_TIER: 'pro', GMGN_API_KEY: 'fake', TYPESAFE_API_KEY: '',
   LATENCY_S: '0', FAIL_RATE: '0', QUOTE_SOURCE: 'jupiter', FEE_PCT: '1', TIP_USD: '0.12' });
-const imp = f => import(pathToFileURL(join(MOD, f)).href);
+const imp = (f, tag = '') => import(pathToFileURL(join(MOD, f)).href + tag);   // tag => separate module instance (own cooldown state)
 const journalLines = () => existsSync(join(MOD, 'journal.jsonl')) ? readFileSync(join(MOD, 'journal.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : [];
 
 let failed = 0;
@@ -38,7 +38,7 @@ await test('stats reports kline_error, source_error, suspect_tick and rate_limit
 });
 
 await test('gmgn() journals ONE rate_limit_pause per 429 (not for cooldown re-throws)', async () => {
-  const { gmgn, RateLimited } = await imp('lib.mjs');
+  const { gmgn, RateLimited } = await imp('lib.mjs', '?isolated');
   process.env.FAKE_MODE = 'ratelimit';
   assert.throws(() => gmgn(['token', 'info', '--address', 'X'], { ttlMs: 0 }), RateLimited);
   assert.throws(() => gmgn(['token', 'info', '--address', 'Y'], { ttlMs: 0 }), RateLimited);   // still cooling down: no new event
@@ -46,6 +46,52 @@ await test('gmgn() journals ONE rate_limit_pause per 429 (not for cooldown re-th
   const ev = journalLines().filter(r => r.event === 'rate_limit_pause');
   assert.equal(ev.length, 1);
   assert.equal(ev[0].waitS, 17, 'stated 7s + 10s margin');
+});
+
+// ---- Jupiter / SOL price hardening (paper.mjs) ---------------------------------------------------------------------
+const realFetch = globalThis.fetch, realSetTimeout = globalThis.setTimeout;
+function mockNet({ quotes, price }) {                       // quotes: array of responders consumed in order (last one repeats)
+  const calls = { quote: 0, price: 0 };
+  globalThis.fetch = async url => {
+    if (String(url).includes('/price/')) { calls.price++; const r = price(calls.price); if (r instanceof Error) throw r; return r; }
+    const r = quotes[Math.min(calls.quote++, quotes.length - 1)]; if (r instanceof Error) throw r; return r;
+  };
+  globalThis.setTimeout = (f, ms, ...a) => realSetTimeout(f, 0, ...a);   // no real backoff waits
+  return calls;
+}
+const restoreNet = () => { globalThis.fetch = realFetch; globalThis.setTimeout = realSetTimeout; };
+const res = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+const SOLP = () => res(200, { So11111111111111111111111111111111111111112: { usdPrice: 100 } });
+const BUY = { side: 'buy', token: 'TESTtokenAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAApump', usd: 10 };
+
+await test('Jupiter quote retries 5xx and network errors, then fills', async () => {
+  const { paperFill } = await imp('paper.mjs');
+  const calls = mockNet({ quotes: [res(503, {}), new Error('ECONNRESET'), res(200, { outAmount: '5000000', priceImpactPct: '0.01' })], price: SOLP });
+  try { const r = await paperFill(BUY, 'sol'); assert.equal(r.ok, true, JSON.stringify(r)); assert.equal(r.src, 'jupiter'); assert.equal(calls.quote, 3); }
+  finally { restoreNet(); }
+});
+
+await test('Jupiter quote gives up after bounded retries (no_route, no crash, no infinite loop)', async () => {
+  const { paperFill } = await imp('paper.mjs');
+  const calls = mockNet({ quotes: [res(500, {})], price: SOLP });
+  try { const r = await paperFill(BUY, 'sol'); assert.equal(r.ok, false); assert.match(r.reason, /^no_route/); assert.equal(calls.quote, 4); }
+  finally { restoreNet(); }
+});
+
+await test('Jupiter 4xx (e.g. no route) is NOT retried', async () => {
+  const { paperFill } = await imp('paper.mjs');
+  const calls = mockNet({ quotes: [res(400, { error: 'no route' })], price: SOLP });
+  try { const r = await paperFill(BUY, 'sol'); assert.equal(r.ok, false); assert.equal(calls.quote, 1); }
+  finally { restoreNet(); }
+});
+
+await test('SOL price: retries once on a bad answer, and a persistently bad price fails the fill (price_error)', async () => {
+  const { paperFill } = await imp('paper.mjs');
+  let calls = mockNet({ quotes: [res(200, { outAmount: '5000000', priceImpactPct: '0' })], price: n => (n === 1 ? res(200, {}) : SOLP()) });
+  try { const r = await paperFill(BUY, 'sol'); assert.equal(r.ok, true, JSON.stringify(r)); assert.equal(calls.price, 2); } finally { restoreNet(); }
+  calls = mockNet({ quotes: [res(200, { outAmount: '5000000' })], price: () => res(200, { So11111111111111111111111111111111111111112: { usdPrice: 0 } }) });
+  try { const r = await paperFill(BUY, 'sol'); assert.equal(r.ok, false); assert.match(r.reason, /^price_error/); assert.equal(calls.price, 3); assert.equal(calls.quote, 0, 'never quote with a bad SOL price'); }
+  finally { restoreNet(); }
 });
 
 if (failed) { console.log(`${failed} unit test(s) FAILED`); process.exit(1); }
