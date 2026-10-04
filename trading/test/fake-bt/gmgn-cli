@@ -1,0 +1,17 @@
+#!/usr/bin/env node
+const a = process.argv.slice(2), g = k => a[a.indexOf(k) + 1];
+if (a[0] !== 'market' || a[1] !== 'kline') { process.stdout.write('{}'); process.exit(0); }
+const addr = g('--address'), from = +g('--from'), to = +g('--to'), win = addr.startsWith('W'), list = [];
+let p = 1;
+for (let t = from, k = 0; t <= to; t += 60, k++) {
+  const m = k - 60;                       // minute since first sight (first sight = from + 3600)
+  let next = p;
+  if (m < 0) next = 1;                                         // flat before first sight
+  else if (m < 20) next = p * 1.04;                            // first leg ~2.2x
+  else if (m < 32) next = p * 0.975;                           // pullback ~26%
+  else if (win) next = m < 33 ? p * 1.03 : m < 80 ? p * 1.035 : p * 0.995;   // second leg to >4x
+  else next = m < 34 ? p * 1.02 : p * 0.85;                    // rug
+  const o = p, c = next; p = next;
+  list.push({ time: t, open: String(o), high: String(Math.max(o, c) * 1.005), low: String(Math.min(o, c) * 0.995), close: String(c), volume: '1000', amount: String(m === 32 ? 3000 : 1000) });
+}
+process.stdout.write(JSON.stringify({ list }));
