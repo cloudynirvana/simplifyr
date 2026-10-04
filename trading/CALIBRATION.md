@@ -57,3 +57,15 @@ liquidity and heavy bots/bundlers. Two problems followed:
   `SOURCES=smart,trending` (default). Trending trades are labelled `trending` in byStrategy, separate from `cluster`.
 `node trading/analyze.mjs` now prints the funnel (rejects, signals and deferrals by source, entries, closes).
 This is a strategy change: new run (`reset.sh`), new code hash. Gates and exits are unchanged.
+
+## 9. Four-week plan (paid GMGN plan = 4 weeks): find the edge with replay, confirm forward, then trade
+- **Replay first (`backtest.mjs`).** Every token the bot has seen is replayed on GMGN 1m candles (cached in `trading/cache/`)
+  under three entries (`immediate`, `pullback15`, `wave`) x the live exit ladder, grouped by cohort (`pass_all`, `only:<gate>`,
+  `fail_N`) and by source. Run it with a smaller rate share so the live paper bot keeps working:
+  `GMGN_TIER=plus COST_PCT=5 node trading/backtest.mjs 3000`
+- **Edge candidate:** trades >= 30, avg% > 0, avg_wo_best% > 0, PF >= 1.3 at COST_PCT=5, and still > 0 at COST_PCT=8.
+- Week 1: replay daily on everything collected; pick at most ONE change (source / gate / entry) that the replay supports.
+- Week 2: run that config forward in paper (new run, new hash) to confirm out-of-sample: >= 30 closed trades.
+- Week 3: if the edge gate passes -> owner arms live Phase 1 ($10 trades). If not, iterate once more.
+- Week 4: Phase 2 only if live confirms. When the plan expires the bot still works on the free tier (`GMGN_TIER=free`, slower).
+Replay limits: candles only (no order-flow, dev or liquidity exits), worst-case intra-candle order. It ranks ideas; paper confirms them.

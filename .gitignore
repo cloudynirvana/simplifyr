@@ -34,3 +34,4 @@ trading/state.json
 trading/journal.jsonl
 trading/wallets.json
 trading/archive/
+trading/cache/
