@@ -33,3 +33,9 @@ export function gates(sec, info, now = Math.floor(Date.now() / 1000), c = CFG) {
   if (age > c.maxAgeS) f.push('too_old');
   return f;
 }
+
+// Looser SHADOW cohort (CALIBRATION.md section 11). Only these three numeric thresholds are relaxed; every other gate is unchanged
+// and the hard-safety gates (honeypot, can't sell, tax, mint/freeze) are never relaxed. Paper-only research: it never trades the real book.
+// LOOSE_OVERRIDE='{"minAgeS":300}' is for tests only. SHADOW_LOOSE=0 disables the cohort.
+export const LOOSE = { minLiquidityUsd: 15000, minAgeS: 600, maxBundler: 0.35, ...JSON.parse(process.env.LOOSE_OVERRIDE ?? '{}') };
+export const looseGates = (sec, info, now = Math.floor(Date.now() / 1000)) => gates(sec, info, now, { ...CFG, ...LOOSE });

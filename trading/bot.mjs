@@ -10,7 +10,7 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { gmgn, journal, RateLimited, rateLimitWaitMs } from './lib.mjs';
-import { gates, CFG } from './filter.mjs';
+import { gates, looseGates, CFG } from './filter.mjs';
 import { execute } from './hands.mjs';
 import { notify } from './telegram.mjs';
 import { loadWallets } from './wallets.mjs';
@@ -112,12 +112,14 @@ async function scan() {
     if ((c.src ?? 'smart') === 'smart' && (c.w.size < 3 || !SOURCES.includes('smart'))) continue;
     if (st.watch[tok] || st.pos[tok] || st.rejected[tok] || st.pending[tok]) continue;
     const i = info(tok), s = sec(tok), fail = gates(s, i);
-    if (fail.includes('too_new')) {                           // defer, don't ban: recheck when it reaches minimum age
+    // shadow:loose (CALIBRATION.md s.11): fails a strict gate but passes with liq>=15k, age>=10m, bundlers<=35% (nothing else relaxed)
+    const loose = fail.length && process.env.SHADOW_LOOSE !== '0' && !looseGates(s, i).length ? 'loose' : null;
+    if (fail.includes('too_new') && !loose) {                           // defer, don't ban: recheck when it reaches minimum age
       st.pending[tok] = { sym: c.sym, at: Number(i.creation_timestamp) + CFG.minAgeS };
       journal({ event: 'deferred', token: tok, sym: c.sym, src: c.src ?? 'smart', fail, recheckAt: st.pending[tok].at });
       continue;
     }
-    const shadow = fail.length ? shadowGate(fail, i) : null;
+    const shadow = fail.length ? (shadowGate(fail, i) ?? loose) : null;
     if (fail.length && !shadow) { if (!fail.every(r => SOFT.includes(r))) reject(tok, c.sym, fail, px(i), { snap: snap(s, i) }); continue; }
     if (shadow) journal({ event: 'reject', token: tok, sym: c.sym, fail, px0: px(i), snap: snap(s, i), shadowed: shadow });
     const kf = candles(tok), fl = flow(i), f = feats(kf, fl);
@@ -137,7 +139,7 @@ async function watchlist() {
     if (now - w.ts > 7200) { journal({ event: 'watch_expired', token: tok, sym: w.sym }); delete st.watch[tok]; continue; }
     const i = info(tok), p = px(i);
     w.peak = Math.max(w.peak, p);
-    if (gates(sec(tok), i).some(r => !SOFT.includes(r) && r !== w.shadow)) { reject(tok, w.sym, ['regate'], p); delete st.watch[tok]; continue; }
+    if ((w.shadow === 'loose' ? looseGates : gates)(sec(tok), i).some(r => !SOFT.includes(r) && r !== w.shadow)) { reject(tok, w.sym, ['regate'], p); delete st.watch[tok]; continue; }
     const kf = candles(tok), fl = flow(i), f = feats(kf, fl);
     if (BAD_PHASES.includes(f.phase)) { reject(tok, w.sym, ['phase_' + f.phase], p, f); delete st.watch[tok]; continue; }
     const trigger = ENTRY_MODE === 'pullback' ? p <= w.peak * 0.85 : waveEntry(kf ?? {}, fl).ok;
@@ -259,7 +261,7 @@ function fingerprint() {
   const dir = new URL('.', import.meta.url).pathname, h = createHash('sha256');
   for (const f of readdirSync(dir).filter(f => f.endsWith('.mjs')).sort()) h.update(f).update(readFileSync(dir + f));
   const keys = ['CHAIN', 'ENTRY_MODE', 'ORDER_USD', 'MAX_OPEN', 'DAILY_LOSS_USD', 'BANKROLL_USD', 'TIP_USD', 'FEE_PCT', 'LATENCY_S', 'FAIL_RATE',
-    'SLIPPAGE_BPS', 'QUOTE_SOURCE', 'SOURCES', 'POLL_S', 'POS_POLL_S', 'STALE_MIN', 'WEEKLY_LOSS_USD', 'SHADOW_GATES', 'SHADOW_MAX_OPEN', 'SHADOW_MIN_LIQ', 'MIRROR_MAX_LAG_S', 'GATE_OVERRIDE', 'JEV_MODE', 'JEV_RUG_MAX', 'EXCLUDE_TAGS', 'GMGN_TIER'];
+    'SLIPPAGE_BPS', 'QUOTE_SOURCE', 'SOURCES', 'POLL_S', 'POS_POLL_S', 'STALE_MIN', 'WEEKLY_LOSS_USD', 'SHADOW_GATES', 'SHADOW_MAX_OPEN', 'SHADOW_MIN_LIQ', 'MIRROR_MAX_LAG_S', 'GATE_OVERRIDE', 'SHADOW_LOOSE', 'LOOSE_OVERRIDE', 'JEV_MODE', 'JEV_RUG_MAX', 'EXCLUDE_TAGS', 'GMGN_TIER'];
   return { codeHash: h.digest('hex').slice(0, 12), settings: Object.fromEntries(keys.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]])) };
 }
 

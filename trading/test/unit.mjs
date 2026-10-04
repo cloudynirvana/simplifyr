@@ -48,6 +48,14 @@ await test('gmgn() journals ONE rate_limit_pause per 429 (not for cooldown re-th
   assert.equal(ev[0].waitS, 17, 'stated 7s + 10s margin');
 });
 
+await test('shadow:loose trades never reach the headline numbers (only byStrategy)', async () => {
+  const { computeStats } = await imp('stats.mjs');
+  const close = (strategy, shadow, pnlUsd) => ({ event: 'close', ts: 1, strategy, shadow, pnlUsd, pnlPct: pnlUsd * 10, costsUsd: 0.7, holdS: 600, reason: 'x', peakX: 1.1 });
+  const s = computeStats([close('cluster', null, -1), close('shadow:loose', 'loose', 50), close('shadow:loose', 'loose', 50)]);
+  assert.equal(s.trades, 1); assert.equal(s.totalPnlUsd, -1); assert.equal(s.profitFactor, 0);
+  assert.equal(s.byStrategy['shadow:loose'].n, 2); assert.equal(s.byStrategy['cluster'].n, 1);
+});
+
 // ---- Jupiter / SOL price hardening (paper.mjs) ---------------------------------------------------------------------
 const realFetch = globalThis.fetch, realSetTimeout = globalThis.setTimeout;
 function mockNet({ quotes, price }) {                       // quotes: array of responders consumed in order (last one repeats)

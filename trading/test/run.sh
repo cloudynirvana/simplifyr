@@ -26,6 +26,23 @@ check "$(grep -o '"strategy":"trending"' trading/journal.jsonl | head -1)" '"str
 rm -f trading/journal.jsonl; node -e 'const r={};for(let k=0;k<600;k++)r["R"+k]={sym:"R"+k,ts:1000+k};require("fs").writeFileSync("trading/state.json",JSON.stringify({rejected:r}))'
 sc "{\"px\":1.4,$BASE,\"klEnd\":1.4}"; run
 check "$(node -e 'const r=JSON.parse(require("fs").readFileSync("trading/state.json")).rejected;console.log(Object.keys(r).length+" "+("R599" in r)+" "+("R0" in r))')" "500 true false" "rejected list capped at 500, newest kept"
+# --- looser shadow cohort `shadow:loose` (CALIBRATION.md section 11): liq>=15k, age>=10m, bundlers<=35%; nothing else relaxed ---
+cnt() { { grep -c "$1" trading/journal.jsonl || true; } | head -1; }
+loose() { rm -f trading/journal.jsonl trading/state.json; sc "{\"px\":1.4,\"liq\":$1,\"ageS\":$2,\"devBal\":1000,\"b1\":700,\"s1\":300,\"b5\":3000,\"s5\":2500,\"klEnd\":1.4,\"lastGreen\":true,\"bundler\":$3,\"honeypot\":${4:-0}}"; run; }
+loose 20000 700 0.05
+check "$(cnt '"event":"entry".*"strategy":"shadow:loose"')/$(cnt '"event":"entry"')" "1/1" "loose cohort: liq 20k + age 11m enters as shadow:loose, and only as shadow"
+loose 12000 700 0.05
+check "$(cnt 'shadow:loose')/$(cnt '"event":"deferred"')" "0/1" "loose cohort: liq below 15k is not loose (stays deferred)"
+loose 20000 400 0.05
+check "$(cnt 'shadow:loose')/$(cnt '"event":"deferred"')" "0/1" "loose cohort: age below 10m is not loose (stays deferred)"
+loose 20000 3600 0.30
+check "$(cnt '"event":"entry".*"strategy":"shadow:loose"')" "1" "loose cohort: liq 20k + bundlers 30% enters as shadow:loose"
+loose 20000 3600 0.40
+check "$(cnt 'shadow:loose')/$(cnt '"event":"reject"')" "0/1" "loose cohort: bundlers above 35% is rejected"
+loose 20000 700 0.05 1
+check "$(cnt 'shadow:loose')" "0" "loose cohort: honeypot is never relaxed"
+SHADOW_LOOSE=0 loose 20000 700 0.05
+check "$(cnt 'shadow:loose')/$(cnt '"event":"deferred"')" "0/1" "loose cohort: SHADOW_LOOSE=0 switches it off"
 # VERSION must describe the code in this tree: codehash = sha256 over sorted trading/*.mjs (name + bytes), first 12 hex (same as bot.mjs fingerprint()).
 HASH="$(node -e 'const fs=require("fs"),c=require("crypto"),h=c.createHash("sha256");for(const f of fs.readdirSync("trading").filter(f=>f.endsWith(".mjs")).sort())h.update(f).update(fs.readFileSync("trading/"+f));console.log(h.digest("hex").slice(0,12))')"
 check "$(sed -n 's/^codehash=\([0-9a-f]*\).*/\1/p' trading/VERSION 2>/dev/null)" "$HASH" "trading/VERSION codehash matches the code (is $HASH)"

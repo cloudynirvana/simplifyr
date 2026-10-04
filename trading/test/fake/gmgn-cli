@@ -6,9 +6,9 @@ fs.appendFileSync(process.env.SIM + '/calls.log', a.slice(0, 2).join(' ') + '\n'
 const out = o => { process.stdout.write(JSON.stringify(o)); process.exit(0); };
 if (a[0] === 'track') out({ list: a[1] === 'smartmoney' ? [1, 2, 3].map(k => ({ base_address: T, side: 'buy', maker: 'W' + k, timestamp: now - 600, base_token: { symbol: 'TEST' } }))
   .concat(sc.smartSell ? [1, 2].map(k => ({ base_address: T, side: 'sell', maker: 'W' + k, timestamp: now + 1 })) : []) : [] });
-if (a[0] === 'token' && a[1] === 'security') out({ honeypot: 0, can_not_sell: 0, buy_tax: '0', sell_tax: '0', renounced_mint: true, renounced_freeze_account: true, top_10_holder_rate: '0.2' });
+if (a[0] === 'token' && a[1] === 'security') out({ honeypot: sc.honeypot ?? 0, can_not_sell: 0, buy_tax: '0', sell_tax: '0', renounced_mint: true, renounced_freeze_account: true, top_10_holder_rate: '0.2' });
 if (a[0] === 'token' && a[1] === 'info') out({ symbol: 'TEST', decimals: 6, liquidity: String(sc.liq), creation_timestamp: now - (sc.ageS ?? 3600), holder_count: 900, image_dup_count: 0,
-  stat: { creator_hold_rate: '0', creator_created_count: 1, top_bundler_trader_percentage: '0.05', top_bot_degen_percentage: '0.05', fresh_wallet_rate: '0.2' },
+  stat: { creator_hold_rate: '0', creator_created_count: 1, top_bundler_trader_percentage: String(sc.bundler ?? 0.05), top_bot_degen_percentage: '0.05', fresh_wallet_rate: '0.2' },
   wallet_tags_stat: { smart_wallets: 6 }, dev: { creator_token_balance: String(sc.devBal), twitter_name_change_history: [], twitter_del_post_token_count: 0 },
   price: { price: String(sc.px), buy_volume_1m: String(sc.b1), sell_volume_1m: String(sc.s1), buy_volume_5m: String(sc.b5), sell_volume_5m: String(sc.s5), volume_1m: String(sc.b1 + sc.s1), volume_5m: String(sc.b5 + sc.s5), buys_5m: 100, sells_5m: 80 } });
 if (a[0] === 'market' && a[1] === 'trending') out({ rank: sc.trending ? [{ address: 'TRNDtokenBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBpump', symbol: 'TRND', smart_degen_count: 5 }] : [] });
