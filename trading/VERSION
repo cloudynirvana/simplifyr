@@ -1,0 +1,14 @@
+# What the deployed paper bot must be running. Compare runs ONLY when codehash (and the settings fingerprint) are equal.
+#
+# Scheme: `commit` is the LAST commit that changed any trading/*.mjs file. A file cannot contain the SHA of the commit that adds it,
+# so VERSION names the code commit; commits after it may only touch tests, docs or VERSION itself (none of those are hashed).
+# `codehash` = first 12 hex of sha256 over the sorted top-level trading/*.mjs files (file name + bytes). It is exactly what
+# bot.mjs prints in `BOT START code <hash>` and journals in the `start` event. `bash trading/test/run.sh` fails if this line is stale.
+# Any change to a trading/*.mjs file means: new commit, new codehash, update this file, reset.sh, new run.
+branch=ccr-052bfdf3-sraodn
+commit=bf387fce239922f4c1f34ea5a158e3fb76ccd810
+codehash=54d6afddbcf8
+run=3
+run_name=hygiene
+change=hardening patches (Jupiter/SOL-price retries, stage isolation, rejected cap) + report counters; base ee25d15 (funnel fix: deferral + trending source)
+settings=unchanged from run 2 (set in .env.local on the server, see the journal `start` event for the fingerprint)

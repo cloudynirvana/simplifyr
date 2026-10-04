@@ -26,5 +26,8 @@ check "$(grep -o '"strategy":"trending"' trading/journal.jsonl | head -1)" '"str
 rm -f trading/journal.jsonl; node -e 'const r={};for(let k=0;k<600;k++)r["R"+k]={sym:"R"+k,ts:1000+k};require("fs").writeFileSync("trading/state.json",JSON.stringify({rejected:r}))'
 sc "{\"px\":1.4,$BASE,\"klEnd\":1.4}"; run
 check "$(node -e 'const r=JSON.parse(require("fs").readFileSync("trading/state.json")).rejected;console.log(Object.keys(r).length+" "+("R599" in r)+" "+("R0" in r))')" "500 true false" "rejected list capped at 500, newest kept"
+# VERSION must describe the code in this tree: codehash = sha256 over sorted trading/*.mjs (name + bytes), first 12 hex (same as bot.mjs fingerprint()).
+HASH="$(node -e 'const fs=require("fs"),c=require("crypto"),h=c.createHash("sha256");for(const f of fs.readdirSync("trading").filter(f=>f.endsWith(".mjs")).sort())h.update(f).update(fs.readFileSync("trading/"+f));console.log(h.digest("hex").slice(0,12))')"
+check "$(sed -n 's/^codehash=\([0-9a-f]*\).*/\1/p' trading/VERSION 2>/dev/null)" "$HASH" "trading/VERSION codehash matches the code (is $HASH)"
 node trading/test/unit.mjs || fail=1     # offline unit tests (counters, retries, ...)
 exit $fail
