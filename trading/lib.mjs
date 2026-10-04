@@ -47,6 +47,7 @@ export function gmgn(args, { ttlMs = 20000 } = {}) {
     if (/429|RATE_LIMIT/.test(msg)) {
       const m = msg.match(/~(\d+)s remaining/);
       cooldownUntil = Date.now() + ((m ? Number(m[1]) : 60) + 10) * 1000;   // wait the stated time + margin
+      journal({ event: 'rate_limit_pause', waitS: Math.ceil(rateLimitWaitMs() / 1000), call: args.slice(0, 2).join(' ') });   // counted in stats.mjs
       throw new RateLimited(`GMGN rate limited, pausing ${Math.ceil(rateLimitWaitMs() / 1000)}s`);
     }
     throw e;

@@ -27,12 +27,15 @@ export function computeStats(j = readJournal()) {
   const byEntryPhase = {};
   for (const t of trips) { const k = t.entryPhase ?? 'n/a', r = (byEntryPhase[k] ??= { n: 0, wins: 0, pnl: 0 }); r.n++; r.pnl += t.pnlUsd; if (t.pnlUsd > 0) r.wins++; }
   const capture = trips.filter(t => t.peakX > 1).map(t => (1 + t.pnlPct / 100) / t.peakX);   // exit value vs best price seen
+  // Data-quality counters: must be reported with every result (a quiet run with errors is not a clean run).
+  const n = ev => j.filter(r => r.event === ev).length;
+  const counters = { kline_error: n('kline_error'), source_error: n('source_error'), suspect_tick: n('suspect_tick'), rate_limit_pause: n('rate_limit_pause') };
   const lag = j.filter(r => r.event === 'mirror_entry').map(r => r.copyLagPct);
   const bank = Number(process.env.BANKROLL_USD ?? 100);
   return {
     runs: j.filter(r => r.event === 'start').map(r => ({ at: new Date(r.ts).toISOString(), code: r.codeHash, settings: r.settings })).slice(-5),
     bankrollStartUsd: bank, equityUsd: bank + cum, returnPct: cum / bank * 100, maxDrawdownPctOfBankroll: mdd / bank * 100,
-    byStrategy: by, byJev, byEntryPhase, avgPeakCapture: avg(capture), klineErrors: j.filter(r => r.event === 'kline_error').length, mirrorCopyLagPctAvg: avg(lag), mirrorStale: j.filter(r => r.event === 'mirror_stale').length,
+    counters, byStrategy: by, byJev, byEntryPhase, avgPeakCapture: avg(capture), klineErrors: counters.kline_error, mirrorCopyLagPctAvg: avg(lag), mirrorStale: j.filter(r => r.event === 'mirror_stale').length,
     trades: trips.length, winRate: trips.length ? wins.length / trips.length : 0,
     avgWinUsd: avg(wins.map(t => t.pnlUsd)), avgLossUsd: avg(losses.map(t => t.pnlUsd)),
     expectancyUsd: avg(trips.map(t => t.pnlUsd)), profitFactor: gl ? gw / gl : null,

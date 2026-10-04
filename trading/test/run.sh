@@ -23,4 +23,5 @@ rm -f trading/journal.jsonl trading/state.json; sc "{\"px\":1.4,\"liq\":15000,\"
 check "$(grep -o '"strategy":"shadow:low_liquidity"' trading/journal.jsonl | head -1)" '"strategy":"shadow:low_liquidity"' "near-miss goes to shadow cohort"
 rm -f trading/journal.jsonl trading/state.json; sc "{\"px\":1.4,$BASE,\"klEnd\":1.4,\"trending\":true}"; SOURCES=trending run
 check "$(grep -o '"strategy":"trending"' trading/journal.jsonl | head -1)" '"strategy":"trending"' "trending source entry"
+node trading/test/unit.mjs || fail=1     # offline unit tests (counters, retries, ...)
 exit $fail
