@@ -226,6 +226,7 @@ async function sell(tok, q, frac, why, exitF) {
 
 async function positions() {
   for (const [tok, q] of Object.entries(st.pos)) {
+   try {   // [local patch] per-position isolation: one bad token must not skip exits of the others (RateLimited still pauses)
     const i = info(tok, 5000), p = px(i), x = p / q.entryPx, fl = flow(i), held = (nowS() - q.openedTs) / 60;
     if (p > q.lastPx * 3 && !(q.jumpPx && Math.abs(p / q.jumpPx - 1) < 0.3)) {
       q.jumpPx = p; journal({ event: 'suspect_tick', token: tok, sym: q.sym, px: p, lastPx: q.lastPx }); continue;
@@ -249,6 +250,7 @@ async function positions() {
     if (!q.tp1 && x >= 2 && await sell(tok, q, 1 / 3, 'tp1_2x', ex)) q.tp1 = true;
     if (st.pos[tok] && !q.tp2 && x >= 4 && await sell(tok, q, 0.5, 'tp2_4x', ex)) q.tp2 = true;
     if (st.pos[tok] && q.tp1 && p <= q.peak * 0.75) await sell(tok, q, 1, 'trail_-25%', ex);
+   } catch (e) { if (e instanceof RateLimited) throw e; console.error(`positions ${tok}:`, e.message); }
   }
 }
 
@@ -261,9 +263,22 @@ function fingerprint() {
   return { codeHash: h.digest('hex').slice(0, 12), settings: Object.fromEntries(keys.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]])) };
 }
 
+// [local patch] prune: closeTrip now also writes st.rejected, which would otherwise grow without bound
+const MAX_REJECTED = 500;
+function prune() {
+  const keys = Object.keys(st.rejected);
+  if (keys.length <= MAX_REJECTED) return;
+  keys.sort((a, b) => (st.rejected[b].ts ?? 0) - (st.rejected[a].ts ?? 0));
+  for (const k of keys.slice(MAX_REJECTED)) delete st.rejected[k];
+}
 async function step(slow) {
-  try { await positions(); if (slow) { await scan(); await watchlist(); await mirrorScan(); followups(); await dailySummary(); } }
-  catch (e) { console.error(e instanceof RateLimited ? e.message : 'cycle error: ' + (e.stack ?? e.message)); }
+  // [local patch] each stage isolated: a failure in one never skips the others (exits always run first)
+  const stages = [['positions', positions]];
+  if (slow) stages.push(['scan', scan], ['watchlist', watchlist], ['mirrorScan', mirrorScan], ['followups', async () => followups()], ['dailySummary', dailySummary]);
+  for (const [name, fn] of stages) {
+    try { await fn(); } catch (e) { console.error(e instanceof RateLimited ? e.message : `cycle ${name} error: ` + (e.stack ?? e.message)); }
+  }
+  try { prune(); } catch (e) { console.error('prune error:', e.message); }
   save();                                                   // always persist partial progress (e.g. after a fill)
 }
 

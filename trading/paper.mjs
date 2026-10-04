@@ -14,15 +14,24 @@ const int = n => BigInt(Math.floor(n)).toString();
 async function jupQuote(inMint, outMint, amount) {
   const u = `https://lite-api.jup.ag/swap/v1/quote?inputMint=${inMint}&outputMint=${outMint}&amount=${amount}&slippageBps=${P.slippageBps}`;
   for (let k = 0; ; k++) {                                     // free Jupiter API throttles: back off, don't hammer
-    const r = await fetch(u); const d = await r.json().catch(() => ({}));
-    if (r.status === 429 && k < 3) { await sleep(1500 * 2 ** k); continue; }
+    let r, d;
+    try { r = await fetch(u); d = await r.json().catch(() => ({})); }          // [local patch] network errors retry too
+    catch (err) { if (k < 3) { await sleep(1500 * 2 ** k); continue; } throw err; }
+    if ((r.status === 429 || r.status >= 500) && k < 3) { await sleep(1500 * 2 ** k); continue; }   // [local patch] also retry 5xx
     if (!r.ok || !d.outAmount) throw new Error(d.error ?? `quote http ${r.status}`);
     return d;
   }
 }
-async function solUsd() {
-  const d = await (await fetch(`https://lite-api.jup.ag/price/v3?ids=${SOL}`)).json();
-  return Number(d[SOL].usdPrice);
+async function solUsd() {                                      // [local patch] retry + validate the SOL price
+  for (let k = 0; ; k++) {
+    try {
+      const r = await fetch(`https://lite-api.jup.ag/price/v3?ids=${SOL}`);
+      if (!r.ok) throw new Error(`price http ${r.status}`);
+      const v = Number((await r.json())[SOL]?.usdPrice);
+      if (!(v > 0)) throw new Error('price missing');
+      return v;
+    } catch (err) { if (k >= 2) throw err; await sleep(1000 * (k + 1)); }
+  }
 }
 
 export async function paperFill(order, chain) {
@@ -30,7 +39,8 @@ export async function paperFill(order, chain) {
   if (Math.random() < P.failRate) return { ok: false, reason: 'tx_failed' };
   if (chain !== 'sol' || process.env.QUOTE_SOURCE === 'model') return modelFill(order, chain);
   const info = gmgn(['token', 'info', '--chain', chain, '--address', order.token], { ttlMs: 0 }); // fresh price after latency
-  const mid = Number(info.price?.price), dec = Number(info.decimals), sol = await solUsd();
+  const mid = Number(info.price?.price), dec = Number(info.decimals);
+  let sol; try { sol = await solUsd(); } catch (err) { return { ok: false, reason: 'price_error: ' + err.message }; }   // [local patch]
   try {
     if (order.side === 'buy') {
       const fee = order.usd * P.feePct / 100 + P.tipUsd;              // platform fee + tip come out of the spend
