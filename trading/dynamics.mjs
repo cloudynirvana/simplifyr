@@ -5,16 +5,18 @@
 const n = Number, mean = a => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : NaN);
 
 // Candles -> the six gmgn-kline-pattern measurements (+ green streak). Division guards return null ("n/a").
-export function klineFeatures(list = []) {
-  const k = list.map(c => ({ t: n(c.time), o: n(c.open), h: n(c.high), l: n(c.low), c: n(c.close), v: n(c.volume) || 0, usd: n(c.amount) || 0 }))
-    .filter(c => c.c > 0 && c.h > 0 && c.l > 0).sort((a, b) => a.t - b.t);
+// asOf (unix s): drop the still-forming candle. A candle that started less than 60s before asOf is incomplete; its volume
+// is a fraction of a minute and made steady tokens read as 'dead' (bug found in run 4: 10 of 13 'dead' at signal time).
+export function klineFeatures(list = [], asOf = null) {
+  const k = list.map(c => ({ t: n(c.time) > 1e12 ? n(c.time) / 1000 : n(c.time), o: n(c.open), h: n(c.high), l: n(c.low), c: n(c.close), v: n(c.volume) || 0, usd: n(c.amount) || 0 }))
+    .filter(c => c.c > 0 && c.h > 0 && c.l > 0 && (asOf === null || c.t <= asOf - 60)).sort((a, b) => a.t - b.t);
   const N = k.length;
   if (N < 10) return { n: N, insufficient: true };
   const C = k.map(c => c.c), V = k.map(c => c.usd || c.v);
   const m9 = mean(C.slice(-9)), m21 = mean(C.slice(-21));
   const base = N >= 24 ? mean(C.slice(-24, -19)) : C[0];
   const slope = base ? (N >= 24 ? (mean(C.slice(-5)) - base) / base : (C[N - 1] - C[0]) / C[0]) : null;
-  const hi = Math.max(...k.map(c => c.h)), lo = Math.min(...k.map(c => c.l)), vAvg = mean(V.slice(-21, -1));
+  const hi = Math.max(...k.map(c => c.h)), lo = Math.min(...k.map(c => c.l)), vAvg = mean(V.slice(-23, -3));
   let green = 0; for (let i = N - 1; i >= 0 && k[i].c > k[i].o; i--) green++;
   const last = k[N - 1];
   return {
@@ -22,7 +24,8 @@ export function klineFeatures(list = []) {
     volatility: mean(k.slice(-14).map(c => (c.h - c.l) / c.c)),
     drawdown: hi ? (hi - C[N - 1]) / hi : null, upFromLow: lo ? (C[N - 1] - lo) / lo : null,
     retrace: hi > lo ? (hi - C[N - 1]) / (hi - lo) : null,       // share of the whole wave given back (0 = at high, 1 = at low)
-    volRatio: vAvg ? V[N - 1] / vAvg : null, lastGreen: last.c > last.o, greenStreak: green,
+    // volRatio: last 3 CLOSED minutes vs the 20 before, so one quiet minute is not 'dead'
+    volRatio: vAvg ? mean(V.slice(-3)) / vAvg : null, lastGreen: last.c > last.o, greenStreak: green,
     minsSinceHigh: (last.t - k.reduce((b, c) => (c.h >= b.h ? c : b)).t) / 60,
   };
 }

@@ -47,4 +47,9 @@ check "$(cnt 'shadow:loose')/$(cnt '"event":"deferred"')" "0/1" "loose cohort: S
 HASH="$(node -e 'const fs=require("fs"),c=require("crypto"),h=c.createHash("sha256");for(const f of fs.readdirSync("trading").filter(f=>f.endsWith(".mjs")).sort())h.update(f).update(fs.readFileSync("trading/"+f));console.log(h.digest("hex").slice(0,12))')"
 check "$(sed -n 's/^codehash=\([0-9a-f]*\).*/\1/p' trading/VERSION 2>/dev/null)" "$HASH" "trading/VERSION codehash matches the code (is $HASH)"
 node trading/test/unit.mjs || fail=1     # offline unit tests (counters, retries, ...)
+rm -f trading/journal.jsonl trading/state.json; sc "{\"px\":1.4,\"liq\":80000,\"ageS\":3600,\"devBal\":1000,\"b1\":200,\"s1\":100,\"b5\":600,\"s5\":500,\"klEnd\":1.4,\"lastGreen\":true}"
+SHADOW_LOOSE=0 run; SHADOW_LOOSE=0 run
+check "$(grep -c '"fail":\["phase_dead"\]' trading/journal.jsonl || true)" "0" "bad phase does not kill a watched token on 2 readings"
+SHADOW_LOOSE=0 run
+check "$(grep -c '"fail":\["phase_dead"\]' trading/journal.jsonl || true)" "1" "bad phase kills it on the 3rd consecutive reading (PHASE_CONFIRM=3)"
 exit $fail

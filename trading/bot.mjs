@@ -22,7 +22,7 @@ const env = (k, d) => Number(process.env[k] ?? d);
 const CHAIN = process.env.CHAIN ?? 'sol', ENTRY_MODE = process.env.ENTRY_MODE ?? 'wave';
 const POLL_MS = env('POLL_S', 60) * 1000, POS_POLL_MS = env('POS_POLL_S', 15) * 1000;
 const SIZE = env('ORDER_USD', 10), MAX_OPEN = env('MAX_OPEN', 5), DAILY_STOP = env('DAILY_LOSS_USD', 30);
-const BANKROLL = env('BANKROLL_USD', 100), STALE_MIN = env('STALE_MIN', 45);
+const BANKROLL = env('BANKROLL_USD', 100), STALE_MIN = env('STALE_MIN', 45), PHASE_CONFIRM = env('PHASE_CONFIRM', 3);
 const SOFT = ['too_new', 'too_few_smart_wallets'];
 // Candidate sources. 'smart' = >=3 smart/KOL buyers in 1h (catches launches: mostly botted/bundled, fails gates).
 // 'trending' = GMGN rank pre-filtered SERVER-SIDE with our own gates (liquidity, smart holders, age window, bundlers, top10, dev),
@@ -64,7 +64,7 @@ const info = (tok, ttlMs) => gmgn(['token', 'info', '--chain', CHAIN, '--address
 const sec = tok => gmgn(['token', 'security', '--chain', CHAIN, '--address', tok]);
 function candles(tok) {                                        // last 60 x 1m candles; failure is journaled, never silent
   const t = nowS();
-  try { return klineFeatures(gmgn(['market', 'kline', '--chain', CHAIN, '--address', tok, '--resolution', '1m', '--from', String(t - 3600), '--to', String(t)], { ttlMs: 50000 }).list); }
+  try { return klineFeatures(gmgn(['market', 'kline', '--chain', CHAIN, '--address', tok, '--resolution', '1m', '--from', String(t - 3600), '--to', String(t)], { ttlMs: 50000 }).list, t); }
   catch (e) { if (e instanceof RateLimited) throw e; journal({ event: 'kline_error', token: tok, err: String(e.message).slice(0, 200) }); return null; }
 }
 const snap = (s, i) => ({ top10: +s.top_10_holder_rate, creatorHold: +i.stat?.creator_hold_rate, bundler: +i.stat?.top_bundler_trader_percentage,
@@ -141,7 +141,13 @@ async function watchlist() {
     w.peak = Math.max(w.peak, p);
     if ((w.shadow === 'loose' ? looseGates : gates)(sec(tok), i).some(r => !SOFT.includes(r) && r !== w.shadow)) { reject(tok, w.sym, ['regate'], p); delete st.watch[tok]; continue; }
     const kf = candles(tok), fl = flow(i), f = feats(kf, fl);
-    if (BAD_PHASES.includes(f.phase)) { reject(tok, w.sym, ['phase_' + f.phase], p, f); delete st.watch[tok]; continue; }
+    // A bad phase must persist PHASE_CONFIRM consecutive checks before it kills a watched token (one noisy reading is not a verdict).
+    if (BAD_PHASES.includes(f.phase)) {
+      w.bad = (w.bad ?? 0) + 1;
+      if (w.bad >= PHASE_CONFIRM) { reject(tok, w.sym, ['phase_' + f.phase], p, { ...f, checks: w.bad }); delete st.watch[tok]; }
+      continue;
+    }
+    w.bad = 0;
     const trigger = ENTRY_MODE === 'pullback' ? p <= w.peak * 0.85 : waveEntry(kf ?? {}, fl).ok;
     if (!trigger || !(w.shadow ? canShadow() : canBuy())) continue;
     await openPos(tok, { sym: w.sym, strategy: w.shadow ? 'shadow:' + w.shadow : (w.src === 'trending' ? 'trending' : 'cluster'), shadow: w.shadow, jev: w.jev, i, p, f });
@@ -261,7 +267,7 @@ function fingerprint() {
   const dir = new URL('.', import.meta.url).pathname, h = createHash('sha256');
   for (const f of readdirSync(dir).filter(f => f.endsWith('.mjs')).sort()) h.update(f).update(readFileSync(dir + f));
   const keys = ['CHAIN', 'ENTRY_MODE', 'ORDER_USD', 'MAX_OPEN', 'DAILY_LOSS_USD', 'BANKROLL_USD', 'TIP_USD', 'FEE_PCT', 'LATENCY_S', 'FAIL_RATE',
-    'SLIPPAGE_BPS', 'QUOTE_SOURCE', 'SOURCES', 'POLL_S', 'POS_POLL_S', 'STALE_MIN', 'WEEKLY_LOSS_USD', 'SHADOW_GATES', 'SHADOW_MAX_OPEN', 'SHADOW_MIN_LIQ', 'MIRROR_MAX_LAG_S', 'GATE_OVERRIDE', 'SHADOW_LOOSE', 'LOOSE_OVERRIDE', 'JEV_MODE', 'JEV_RUG_MAX', 'EXCLUDE_TAGS', 'GMGN_TIER'];
+    'SLIPPAGE_BPS', 'QUOTE_SOURCE', 'SOURCES', 'POLL_S', 'POS_POLL_S', 'STALE_MIN', 'PHASE_CONFIRM', 'WEEKLY_LOSS_USD', 'SHADOW_GATES', 'SHADOW_MAX_OPEN', 'SHADOW_MIN_LIQ', 'MIRROR_MAX_LAG_S', 'GATE_OVERRIDE', 'SHADOW_LOOSE', 'LOOSE_OVERRIDE', 'JEV_MODE', 'JEV_RUG_MAX', 'EXCLUDE_TAGS', 'GMGN_TIER'];
   return { codeHash: h.digest('hex').slice(0, 12), settings: Object.fromEntries(keys.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]])) };
 }
 

@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TMP = mkdtempSync(join(tmpdir(), 'bot-unit-')), MOD = join(TMP, 'trading'), BIN = join(TMP, 'bin');
 mkdirSync(MOD); mkdirSync(BIN);
-for (const f of ['lib.mjs', 'stats.mjs', 'paper.mjs']) copyFileSync(join(SRC, f), join(MOD, f));
+for (const f of ['lib.mjs', 'stats.mjs', 'paper.mjs', 'dynamics.mjs']) copyFileSync(join(SRC, f), join(MOD, f));
 // Fake gmgn-cli: FAKE_MODE=ratelimit -> 429 with a stated reset; otherwise a minimal `token info` answer.
 writeFileSync(join(BIN, 'gmgn-cli'), `#!/usr/bin/env node
 if (process.env.FAKE_MODE === 'ratelimit') { console.error('Error: 429 RATE_LIMIT ~7s remaining'); process.exit(1); }
@@ -100,6 +100,27 @@ await test('SOL price: retries once on a bad answer, and a persistently bad pric
   calls = mockNet({ quotes: [res(200, { outAmount: '5000000' })], price: () => res(200, { So11111111111111111111111111111111111111112: { usdPrice: 0 } }) });
   try { const r = await paperFill(BUY, 'sol'); assert.equal(r.ok, false); assert.match(r.reason, /^price_error/); assert.equal(calls.price, 3); assert.equal(calls.quote, 0, 'never quote with a bad SOL price'); }
   finally { restoreNet(); }
+});
+
+// ---- wave-phase measurement (run-4 bug: in-progress candle read as 'dead') --------------------------------------------
+const candleSeries = (asOf, vols) => vols.map((v, k) => ({ time: asOf - (vols.length - k + 1) * 60, open: '1', high: '1.01', low: '0.99', close: '1', volume: String(v), amount: String(v) }));
+const FLOW_OK = { vol5mUsd: 50000, buyRatio5m: 0.5 };
+await test('phase: a still-forming last candle (tiny partial volume) is dropped, steady token is NOT dead', async () => {
+  const { klineFeatures, phase } = await imp('dynamics.mjs');
+  const asOf = 1_800_000_000, list = candleSeries(asOf, Array(40).fill(1000));
+  list.push({ time: asOf - 10, open: '1', high: '1', low: '1', close: '1', volume: '20', amount: '20' });   // started 10s ago
+  const kf = klineFeatures(list, asOf);
+  assert.ok(kf.volRatio > 0.9, 'volRatio ' + kf.volRatio); assert.notEqual(phase(kf, FLOW_OK), 'dead');
+});
+await test('phase: one quiet closed minute among steady ones is not dead (3-minute volume window)', async () => {
+  const { klineFeatures, phase } = await imp('dynamics.mjs');
+  const asOf = 1_800_000_000, kf = klineFeatures(candleSeries(asOf, [...Array(39).fill(1000), 50]), asOf);
+  assert.notEqual(phase(kf, FLOW_OK), 'dead', 'volRatio ' + kf.volRatio);
+});
+await test('phase: genuinely dead volume (3 near-empty minutes) is still dead', async () => {
+  const { klineFeatures, phase } = await imp('dynamics.mjs');
+  const asOf = 1_800_000_000, kf = klineFeatures(candleSeries(asOf, [...Array(37).fill(1000), 20, 10, 5]), asOf);
+  assert.equal(phase(kf, FLOW_OK), 'dead');
 });
 
 if (failed) { console.log(`${failed} unit test(s) FAILED`); process.exit(1); }
