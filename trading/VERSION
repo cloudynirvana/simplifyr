@@ -6,9 +6,9 @@
 # bot.mjs prints in `BOT START code <hash>` and journals in the `start` event. `bash trading/test/run.sh` fails if this line is stale.
 # Any change to a trading/*.mjs file means: new commit, new codehash, update this file, reset.sh, new run.
 branch=ccr-052bfdf3-sraodn
-commit=7dd49abb6de3dc1fa3a58d68991bac8f9dbfe3b1
-codehash=b733990dd227
-run=4
-run_name=loose-shadow
-change=ONE change vs run 3 (54d6afddbcf8 @ bf387fc): looser shadow cohort shadow:loose (CALIBRATION.md s.11). Real-book gates, exits and settings unchanged.
+commit=ac479eefccd7883d12790046ded454d472b3dafc
+codehash=27fa618ba107
+run=5
+run_name=phase-measurement-fix
+change=ONE change vs run 4 (b733990dd227): wave-phase measurement fix (drop in-progress candle, 3-min volume window, PHASE_CONFIRM=3). Gates, exits, sizing, settings unchanged.
 settings=unchanged from runs 2-3 (set in .env.local on the server, see the journal `start` event for the fingerprint)
